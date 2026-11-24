@@ -1,38 +1,34 @@
-# CONFLICT — Strategy System
-**Build 0.4.0 · 2026 foundation**
+# CONFLICT — Real-Time 3D
 
-Conflict has been rebuilt as a modern native Windows strategy prototype. The old medieval arena and menu have been removed.
+**Build 0.5.0 · 2026 direction**
 
-## New direction
-- Clean dark interface with a compact navigation sidebar.
-- A fictional regional map is the main view.
-- Troops are represented by small colored circles grouped by territory.
-- Each region displays its troop count.
-- Select a region, recruit 50 units, and advance turns.
-- Army view lists forces in all six regions.
-- Report view shows total and per-region distribution.
-- Six fictional regions and three abstract factions are starter data.
+The 2D territory interface, troop counters and menus have been replaced by a real-time 3D scene.
+
+## Visual direction
+- White application background with no visible menu, counters, labels or HUD.
+- A 3D soil clearing sits on a visible stone-rock base.
+- Trees and scattered stones frame the central field.
+- Small colored sphere units represent the two teams.
+- The camera looks down at the entire 3D model from an isometric angle.
+
+## Real-time simulation
+- 20 sphere units per team at round start.
+- Units continuously identify and approach the nearest opponent.
+- Units engage when close enough; defeated units disappear.
+- The remaining team wins the round.
+- After the winner has been decided, the next round resets automatically.
 
 ## Technology
-- **C++17** — Windows application, Direct3D 11 renderer, DXGI swap chain, Direct2D drawing and DirectWrite text.
-- **Rust** — simulation state, troop totals, recruitment, turns and validated territory transfers.
-- The Rust library is built as \`conflict_core.dll\` and loaded by the C++ application.
-- Native Windows app; no browser, HTML, Unity, Unreal or Godot.
+- **C++17 + Direct3D 11 / DXGI** — native Windows window, 3D mesh rendering, depth buffer and presentation.
+- **Rust** — real-time unit state, movement, target selection, engagement and automatic round reset.
+- No HTML, browser wrapper, Unity, Unreal or Godot.
+- F11 toggles borderless mode; Esc returns to the windowed mode.
 
-## NVIDIA App overlay
-The renderer uses a Direct3D 11 / DXGI presentation path and does not block external overlays or capture Alt+Z. NVIDIA overlay availability and individual features still depend on the installed NVIDIA App version, driver, GPU and application compatibility. This project does not claim official NVIDIA certification.
-
-Press **F11** to toggle borderless mode. Press **Esc** to leave borderless mode.
-
-## Controls
-- Click a region to select it.
-- **Recruit +50** adds units to the selected territory.
-- **Next Turn** advances the simulation and applies small automatic reinforcements.
-- Sidebar buttons switch between Map, Army, Report and Settings.
-- **F11** toggles borderless mode.
+## NVIDIA overlay
+The application uses Direct3D 11 and DXGI and does not capture Alt+Z or block external overlays. NVIDIA App overlay compatibility is intended, but availability depends on the installed NVIDIA App, driver and system configuration. This is not an NVIDIA-certified integration.
 
 ## Build on Windows 10/11
-Requires Visual Studio 2022 Build Tools or Visual Studio with Desktop development with C++, CMake 3.24+, and Rust stable with Cargo.
+Requirements: Visual Studio with Desktop development with C++, CMake 3.24+, and Rust stable with Cargo.
 
 \`\`\`powershell
 cargo test --manifest-path rust/Cargo.toml
@@ -40,11 +36,7 @@ cmake -S . -B build -A x64
 cmake --build build --config Release
 \`\`\`
 
-Output:
-- \`build/Release/Conflict.exe\`
-- \`build/Release/conflict_core.dll\`
+Keep \`Conflict.exe\` and \`conflict_core.dll\` together in the same folder.
 
-Keep both files in the same folder when running the game.
-
-## Roadmap
-This is the new foundation. Next milestones: a larger world map, detailed territory borders, interactive transfers between adjacent regions, save/load and a cinematic intro. The current map and faction names are prototype content.
+## Current scope
+The terrain, stone base, trees and troop spheres are procedurally generated low-poly 3D geometry. They are a first 3D prototype, not final photorealistic game assets or a finished cinematic.
