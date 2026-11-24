@@ -15,6 +15,7 @@
 #include <vector>
 #include <utility>
 #include <limits>
+#include <thread>
 
 using Microsoft::WRL::ComPtr;
 using namespace DirectX;
@@ -430,7 +431,7 @@ public:
                 context->ResolveSubresource(backBuffer.Get(),0,sceneColorTexture.Get(),0,DXGI_FORMAT_R8G8B8A8_UNORM);
             }
         }
-        swapChain->Present(1,0);
+        swapChain->Present(0,0);
     }
 
 private:
@@ -787,18 +788,38 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT message,WPARAM wParam,LPARAM lParam) 
     case WM_ERASEBKGND:
         return 1;
     case WM_PAINT: {
-        PAINTSTRUCT ps{};BeginPaint(hwnd,&ps);EndPaint(hwnd,&ps);return 0;
+        PAINTSTRUCT ps{};BeginPaint(hwnd,&ps);EndPaint(hwnd,&ps);DrawOverlay(hwnd);return 0;
     }
     case WM_KEYDOWN:
         if(wParam==VK_F11)ToggleBorderless(hwnd);
-        else if(wParam==VK_ESCAPE&&borderless)ToggleBorderless(hwnd);
-        else if(wParam==VK_F1&&renderer) {
-            if(renderer->SetQuality(0))SetWindowTextW(hwnd,L"CONFLICT | GRAFICOS: BAJOS (F1/F2/F3)");
-        } else if(wParam==VK_F2&&renderer) {
-            if(renderer->SetQuality(1))SetWindowTextW(hwnd,L"CONFLICT | GRAFICOS: MEDIOS (F1/F2/F3)");
-        } else if(wParam==VK_F3&&renderer) {
-            if(renderer->SetQuality(2))SetWindowTextW(hwnd,L"CONFLICT | GRAFICOS: ALTOS (F1/F2/F3)");
+        else if(wParam==VK_ESCAPE) {
+            if(screenMode==ScreenMode::Game)screenMode=ScreenMode::Options;
+            else if(screenMode==ScreenMode::Graphics)screenMode=ScreenMode::Options;
+            else if(screenMode==ScreenMode::Options)screenMode=ScreenMode::Game;
+            else screenMode=ScreenMode::Options;
+            InvalidateRect(hwnd,nullptr,FALSE);
+        } else if(wParam==VK_F1&&renderer)renderer->SetQuality(0);
+        else if(wParam==VK_F2&&renderer)renderer->SetQuality(1);
+        else if(wParam==VK_F3&&renderer)renderer->SetQuality(2);
+        else if(wParam==VK_F4&&renderer)renderer->SetQuality(3);
+        return 0;
+    case WM_LBUTTONDOWN:
+        HandleUiClick(hwnd,GET_X_LPARAM(lParam),GET_Y_LPARAM(lParam));
+        return 0;
+    case WM_RBUTTONDOWN:
+        cameraDragging=true;lastMouse={GET_X_LPARAM(lParam),GET_Y_LPARAM(lParam)};
+        SetCapture(hwnd);return 0;
+    case WM_RBUTTONUP:
+        cameraDragging=false;ReleaseCapture();return 0;
+    case WM_MOUSEMOVE:
+        if(cameraDragging&&renderer) {
+            POINT current{GET_X_LPARAM(lParam),GET_Y_LPARAM(lParam)};
+            renderer->RotateCamera(static_cast<float>(current.x-lastMouse.x),static_cast<float>(current.y-lastMouse.y));
+            lastMouse=current;
         }
+        return 0;
+    case WM_MOUSEWHEEL:
+        if(renderer)renderer->ZoomCamera(-static_cast<float>(GET_WHEEL_DELTA_WPARAM(wParam))/120.0f*2.0f);
         return 0;
     case WM_GETMINMAXINFO: {
         auto* info=reinterpret_cast<MINMAXINFO*>(lParam);
@@ -821,7 +842,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR,int show) {
     if(!RegisterClassExW(&wc))return 1;
 
     RECT bounds{0,0,1440,900};AdjustWindowRect(&bounds,WS_OVERLAPPEDWINDOW,FALSE);
-    HWND hwnd=CreateWindowExW(0,WINDOW_CLASS,L"CONFLICT | GRAFICOS: MEDIOS (F1/F2/F3)",WS_OVERLAPPEDWINDOW,
+    HWND hwnd=CreateWindowExW(0,WINDOW_CLASS,L"CONFLICT 0.7.0 | ESC: OPCIONES | WASD + MOUSE: CAMARA",WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT,CW_USEDEFAULT,bounds.right-bounds.left,bounds.bottom-bounds.top,
         nullptr,nullptr,instance,nullptr);
     if(!hwnd)return 1;
@@ -851,16 +872,29 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR,int show) {
         }
         if(!running)break;
 
-        const auto now=std::chrono::steady_clock::now();
+        const auto frameStart=std::chrono::steady_clock::now();
+        const auto now=frameStart;
         float dt=std::chrono::duration<float>(now-previous).count();
         previous=now;
         dt=std::clamp(dt,0.0f,0.05f);
 
-        rustUpdate(dt);
+        if(screenMode==ScreenMode::Game) {
+            const float forward=(GetAsyncKeyState('W')&0x8000?1.0f:0.0f)-(GetAsyncKeyState('S')&0x8000?1.0f:0.0f);
+            const float right=(GetAsyncKeyState('D')&0x8000?1.0f:0.0f)-(GetAsyncKeyState('A')&0x8000?1.0f:0.0f);
+            const float vertical=(GetAsyncKeyState('E')&0x8000?1.0f:0.0f)-(GetAsyncKeyState('Q')&0x8000?1.0f:0.0f);
+            graphics.MoveCamera(forward,right,vertical,dt);
+            rustUpdate(dt);
+        }
         const std::size_t count=rustGetUnits(unitBuffer,MAX_UNITS);
         const float elapsed=std::chrono::duration<float>(now.time_since_epoch()).count();
         graphics.Render(unitBuffer,static_cast<UINT>(std::min(count,static_cast<std::size_t>(MAX_UNITS))),elapsed);
-        Sleep(1);
+        DrawOverlay(hwnd);
+        if(frameLimit>0) {
+            const auto target=std::chrono::milliseconds(1000/frameLimit);
+            const auto deadline=frameStart+target;
+            const auto current=std::chrono::steady_clock::now();
+            if(current<deadline)std::this_thread::sleep_until(deadline);
+        }
     }
     renderer=nullptr;
     return static_cast<int>(msg.wParam);
