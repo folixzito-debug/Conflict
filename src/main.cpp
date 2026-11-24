@@ -402,7 +402,7 @@ public:
         XMVECTOR eye=XMVectorSet(cameraPosition.x,cameraPosition.y,cameraPosition.z,1.0f);
         const float cp=std::cos(cameraPitch);
         XMVECTOR direction=XMVectorSet(std::sin(cameraYaw)*cp,std::sin(cameraPitch),std::cos(cameraYaw)*cp,0.0f);
-        XMVECTOR focus=eye+direction;
+        XMVECTOR focus=XMVectorAdd(eye,direction);
         XMMATRIX view=XMMatrixLookAtLH(eye,focus,XMVectorSet(0.0f,1.0f,0.0f,0.0f));
         XMMATRIX projection=XMMatrixPerspectiveFovLH(XMConvertToRadians(43.0f),aspect,0.1f,150.0f);
         MatrixBuffer matrices{};
