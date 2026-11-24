@@ -32,7 +32,7 @@ void ResetFight(){
  enemy={760.0f,0.0f,100,-1,false,0.0f,0.4f,0.0f};
  gameOver=false; playerWon=false; roundNumber++;
 }
-void StartFight(){ page=Page::QuickFight; ResetFight(); SetTimer(nullptr,1,16,nullptr); }
+void StartFight(HWND hwnd){ page=Page::QuickFight; ResetFight(); SetTimer(hwnd,1,16,nullptr); }
 void Fill(HDC d,RECT r,COLORREF c){HBRUSH b=CreateSolidBrush(c);FillRect(d,&r,b);DeleteObject(b);}
 void Text(HDC d,const wchar_t*s,int x,int y,int size,COLORREF c,bool bold=false,UINT align=DT_LEFT){
  HFONT f=CreateFontW(-size,0,0,0,bold?FW_BOLD:FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH|FF_DONTCARE,L"Segoe UI");
@@ -40,7 +40,7 @@ void Text(HDC d,const wchar_t*s,int x,int y,int size,COLORREF c,bool bold=false,
  RECT r{x,y,clientW-25,y+size+18};DrawTextW(d,s,-1,&r,align|DT_SINGLELINE|DT_VCENTER);SelectObject(d,old);DeleteObject(f);
 }
 void Line(HDC d,int x1,int y1,int x2,int y2,COLORREF c,int width=1){HPEN p=CreatePen(PS_SOLID,width,c),o=(HPEN)SelectObject(d,p);MoveToEx(d,x1,y1,nullptr);LineTo(d,x2,y2);SelectObject(d,o);DeleteObject(p);}
-void Frame(HDC d,RECT r,COLORREF c){HPEN p=CreatePen(PS_SOLID,1,c),*unused=nullptr; HGDIOBJ op=SelectObject(d,p),ob=SelectObject(d,GetStockObject(HOLLOW_BRUSH));Rectangle(d,r.left,r.top,r.right,r.bottom);SelectObject(d,op);SelectObject(d,ob);DeleteObject(p);}
+void Frame(HDC d,RECT r,COLORREF c){HPEN p=CreatePen(PS_SOLID,1,c); HGDIOBJ op=SelectObject(d,p),ob=SelectObject(d,GetStockObject(HOLLOW_BRUSH));Rectangle(d,r.left,r.top,r.right,r.bottom);SelectObject(d,op);SelectObject(d,ob);DeleteObject(p);}
 RECT MenuRect(int i){return RECT{70,270+i*78,550,330+i*78};}
 void DrawMenu(HDC d){
  Text(d,L"ESTRATEGIA  /  COMBATE  /  HISTORIA",70,38,12,muted,true);Line(d,70,66,clientW-70,66,RGB(55,49,40));
@@ -127,7 +127,7 @@ void Update(HWND hwnd){
  if(player.hp<=0||enemy.hp<=0){gameOver=true;playerWon=enemy.hp<=0;}
  InvalidateRect(hwnd,nullptr,FALSE);
 }
-void Activate(HWND hwnd){if(page!=Page::Menu){page=Page::Menu;InvalidateRect(hwnd,nullptr,FALSE);return;}Page target=menuItems[selected].target;if(target==Page::QuickFight){StartFight();}else{page=target;InvalidateRect(hwnd,nullptr,FALSE);}}
+void Activate(HWND hwnd){if(page!=Page::Menu){page=Page::Menu;InvalidateRect(hwnd,nullptr,FALSE);return;}Page target=menuItems[selected].target;if(target==Page::QuickFight){StartFight(hwnd);}else{page=target;InvalidateRect(hwnd,nullptr,FALSE);}}
 LRESULT CALLBACK WndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
  switch(msg){
  case WM_PAINT:Paint(hwnd);return 0;
@@ -141,7 +141,7 @@ LRESULT CALLBACK WndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
    else if(page==Page::QuickFight&&wp=='R'){ResetFight();InvalidateRect(hwnd,nullptr,FALSE);}
    return 0;
  case WM_KEYUP:if(wp<256)keys[wp]=false;return 0;
- case WM_MOUSEMOVE:if(page==Page::Menu){POINT p{GET_X_LPARAM(lp),GET_Y_LPARAM(lp)};int n=-1;for(int i=0;i<MENU_COUNT;i++)if(PtInRect(&MenuRect(i),p))n=i;if(n!=hover){hover=n;InvalidateRect(hwnd,nullptr,FALSE);}}return 0;
+ case WM_MOUSEMOVE:if(page==Page::Menu){POINT p{GET_X_LPARAM(lp),GET_Y_LPARAM(lp)};int n=-1;for(int i=0;i<MENU_COUNT;i++){RECT r=MenuRect(i);if(PtInRect(&r,p))n=i;}if(n!=hover){hover=n;InvalidateRect(hwnd,nullptr,FALSE);}}return 0;
  case WM_LBUTTONUP:if(page==Page::Menu){POINT p{GET_X_LPARAM(lp),GET_Y_LPARAM(lp)};for(int i=0;i<MENU_COUNT;i++){RECT r=MenuRect(i);if(PtInRect(&r,p)){selected=i;Activate(hwnd);break;}}}else if(page!=Page::QuickFight){page=Page::Menu;selected=0;InvalidateRect(hwnd,nullptr,FALSE);}return 0;
  case WM_DESTROY:KillTimer(hwnd,1);PostQuitMessage(0);return 0;
  }return DefWindowProcW(hwnd,msg,wp,lp);
