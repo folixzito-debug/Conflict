@@ -13,6 +13,7 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include <utility>
 
 using Microsoft::WRL::ComPtr;
 using namespace DirectX;
@@ -276,6 +277,10 @@ public:
     }
 
 private:
+    ComPtr<ID3D11Device> device;
+    ComPtr<ID3D11DeviceContext> context;
+    ComPtr<IDXGISwapChain> swapChain;
+
     bool CreateShaders() {
         static const char* shader=R"(
 cbuffer Scene : register(b0) { row_major float4x4 viewProjection; };
