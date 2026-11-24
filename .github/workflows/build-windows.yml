@@ -1,7 +1,7 @@
-name: Build Conflict 0.5.0 3D for Windows
+name: Build Conflict 0.6.0 3D for Windows
 on:
   push:
-    branches: [main, master]
+    branches: [main, master, feature/graphics-units-0.6.0]
   workflow_dispatch:
 permissions:
   contents: write
@@ -39,11 +39,11 @@ jobs:
           Copy-Item build/Release/Conflict.exe package/
           Copy-Item build/Release/conflict_core.dll package/
           Copy-Item README.md package/
-          Compress-Archive -Path package/* -DestinationPath Conflict-0.5.0-Windows.zip -Force
+          Compress-Archive -Path package/* -DestinationPath Conflict-0.6.0-Windows.zip -Force
       - name: Upload build
         uses: actions/upload-artifact@v4
         with:
-          name: Conflict-0.5.0-Windows
+          name: Conflict-0.6.0-Windows
           path: |
             build/Release/Conflict.exe
             build/Release/conflict_core.dll

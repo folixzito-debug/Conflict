@@ -32,12 +32,16 @@ struct Vertex {
 struct UnitView {
     float x;
     float z;
+    float heading;
     std::uint32_t team;
     std::uint32_t alive;
+    std::uint32_t kind;
+    float supportPulse;
 };
 
 struct MatrixBuffer {
     XMFLOAT4X4 viewProjection;
+    XMFLOAT4 lighting;
 };
 
 struct MeshBuilder {
@@ -49,7 +53,8 @@ struct MeshBuilder {
         XMVECTOR vb = XMLoadFloat3(&b);
         XMVECTOR vc = XMLoadFloat3(&c);
         XMVECTOR cross = XMVector3Cross(vb - va, vc - va);
-        XMVECTOR normal = XMVector3Normalize(cross);
+        XMVECTOR normal = XMVectorGetX(XMVector3LengthSq(cross)) < 1.0e-10f
+            ? XMVectorSet(0.0f,1.0f,0.0f,0.0f) : XMVector3Normalize(cross);
         XMFLOAT3 n{};
         XMStoreFloat3(&n, normal);
         vertices.push_back({a, n, color});
@@ -64,19 +69,32 @@ struct MeshBuilder {
         Triangle(a, c, d, color);
     }
 
-    void Box(float cx, float cy, float cz, float sx, float sy, float sz,
-             const XMFLOAT4& color) {
-        const float x0=cx-sx*0.5f, x1=cx+sx*0.5f;
-        const float y0=cy-sy*0.5f, y1=cy+sy*0.5f;
-        const float z0=cz-sz*0.5f, z1=cz+sz*0.5f;
-        const XMFLOAT3 p000{x0,y0,z0}, p001{x0,y0,z1}, p010{x0,y1,z0}, p011{x0,y1,z1};
-        const XMFLOAT3 p100{x1,y0,z0}, p101{x1,y0,z1}, p110{x1,y1,z0}, p111{x1,y1,z1};
-        Quad(p000,p100,p110,p010,color);
-        Quad(p101,p001,p011,p111,color);
-        Quad(p001,p000,p010,p011,color);
-        Quad(p100,p101,p111,p110,color);
-        Quad(p010,p110,p111,p011,color);
-        Quad(p001,p101,p100,p000,color);
+    XMFLOAT3 RotatePoint(float x,float y,float z,float yaw) const {
+        const float c=std::cos(yaw), s=std::sin(yaw);
+        return XMFLOAT3{x*c+z*s,y,-x*s+z*c};
+    }
+
+    void BoxYaw(float cx,float cy,float cz,float sx,float sy,float sz,
+                float yaw,const XMFLOAT4& color) {
+        const float x0=-sx*0.5f,x1=sx*0.5f;
+        const float y0=-sy*0.5f,y1=sy*0.5f;
+        const float z0=-sz*0.5f,z1=sz*0.5f;
+        auto p=[&](float x,float y,float z) {
+            const auto r=RotatePoint(x,y,z,yaw);
+            return XMFLOAT3{cx+r.x,cy+r.y,cz+r.z};
+        };
+        const XMFLOAT3 p000=p(x0,y0,z0),p001=p(x0,y0,z1),p010=p(x0,y1,z0),p011=p(x0,y1,z1);
+        const XMFLOAT3 p100=p(x1,y0,z0),p101=p(x1,y0,z1),p110=p(x1,y1,z0),p111=p(x1,y1,z1);
+        Quad(p000,p001,p011,p010,color);
+        Quad(p100,p110,p111,p101,color);
+        Quad(p000,p010,p110,p100,color);
+        Quad(p001,p101,p111,p011,color);
+        Quad(p000,p100,p101,p001,color);
+        Quad(p010,p011,p111,p110,color);
+    }
+
+    void Box(float cx,float cy,float cz,float sx,float sy,float sz,const XMFLOAT4& color) {
+        BoxYaw(cx,cy,cz,sx,sy,sz,0.0f,color);
     }
 
     void Cylinder(float x, float y, float z, float radius, float height,
@@ -111,8 +129,8 @@ struct MeshBuilder {
                 };
                 const auto a=point(lat0,lon0), b=point(lat0,lon1);
                 const auto c=point(lat1,lon1), d=point(lat1,lon0);
-                Triangle(a,b,c,color);
-                Triangle(a,c,d,color);
+                Triangle(a,c,b,color);
+                Triangle(a,d,c,color);
             }
         }
     }
@@ -131,17 +149,25 @@ float TerrainHeight(float x,float z) {
                  + 0.075f*std::cos(z*0.43f+x*0.11f);
 }
 
-void BuildTree(MeshBuilder& mesh,float x,float z,float scale) {
+void BuildTree(MeshBuilder& mesh,float x,float z,float scale,int quality) {
     const float ground=TerrainHeight(x,z);
-    mesh.Cylinder(x,ground,z,0.13f*scale,1.55f*scale,TRUNK,8);
-    mesh.Sphere(x,ground+1.95f*scale,z,0.78f*scale,0.88f*scale,0.78f*scale,LEAF_A,8,10);
-    mesh.Sphere(x-0.42f*scale,ground+1.72f*scale,z+0.22f*scale,
-                0.52f*scale,0.62f*scale,0.54f*scale,LEAF_B,7,9);
-    mesh.Sphere(x+0.39f*scale,ground+1.78f*scale,z-0.18f*scale,
-                0.55f*scale,0.63f*scale,0.53f*scale,LEAF_C,7,9);
+    const int trunkSegments=quality==0?6:(quality==1?8:12);
+    const int rings=quality==0?6:(quality==1?8:12);
+    const int slices=quality==0?8:(quality==1?10:16);
+    mesh.Cylinder(x,ground,z,0.13f*scale,1.55f*scale,TRUNK,trunkSegments);
+    mesh.Sphere(x,ground+1.95f*scale,z,0.78f*scale,0.88f*scale,0.78f*scale,LEAF_A,rings,slices);
+    if(quality>0) {
+        mesh.Sphere(x-0.42f*scale,ground+1.72f*scale,z+0.22f*scale,
+                    0.52f*scale,0.62f*scale,0.54f*scale,LEAF_B,rings-1,slices-1);
+        mesh.Sphere(x+0.39f*scale,ground+1.78f*scale,z-0.18f*scale,
+                    0.55f*scale,0.63f*scale,0.53f*scale,LEAF_C,rings-1,slices-1);
+    }
+    if(quality==2) {
+        mesh.Sphere(x,ground+2.42f*scale,z,0.42f*scale,0.45f*scale,0.42f*scale,LEAF_C,7,10);
+    }
 }
 
-void BuildWorld(MeshBuilder& mesh) {
+void BuildWorld(MeshBuilder& mesh,int quality) {
     // The rocky underside is a visible physical base, not a 2D map.
     mesh.Box(0.0f,-0.475f,0.0f,32.0f,1.15f,24.0f,ROCK);
     mesh.Box(0.0f,-1.14f,0.0f,31.4f,0.18f,23.4f,ROCK_DARK);
@@ -153,7 +179,8 @@ void BuildWorld(MeshBuilder& mesh) {
     }
 
     // Uneven soil plane with smooth rolling ground.
-    constexpr int NX=48, NZ=36;
+    const int NX=quality==0?24:(quality==1?48:80);
+    const int NZ=quality==0?18:(quality==1?36:60);
     constexpr float XMIN=-14.7f, XMAX=14.7f, ZMIN=-10.7f, ZMAX=10.7f;
     for(int iz=0;iz<NZ;++iz) {
         for(int ix=0;ix<NX;++ix) {
@@ -182,15 +209,112 @@ void BuildWorld(MeshBuilder& mesh) {
         {-1.4f,9.1f,0.90f},{2.5f,9.0f,0.98f},{6.5f,9.0f,0.91f},
         {10.0f,8.9f,1.02f},{13.0f,8.1f,0.92f}
     };
-    for(const auto& tree:trees) BuildTree(mesh,tree[0],tree[1],tree[2]);
+    for(const auto& tree:trees) BuildTree(mesh,tree[0],tree[1],tree[2],quality);
 
     // A few scattered stones give the soil a natural edge.
     const float stones[][2]={{-11.8f,-6.9f},{-8.7f,7.5f},{-5.9f,-7.8f},{6.0f,7.7f},
                              {9.8f,-7.2f},{12.1f,6.8f},{-12.0f,5.8f},{3.0f,7.7f}};
     for(const auto& s:stones) {
         float y=TerrainHeight(s[0],s[1]);
-        mesh.Sphere(s[0],y+0.13f,s[1],0.38f,0.20f,0.31f,ROCK_LIGHT,5,7);
+        mesh.Sphere(s[0],y+0.13f,s[1],0.38f,0.20f,0.31f,ROCK_LIGHT,
+                    quality==0?4:(quality==1?6:9),quality==0?6:(quality==1?8:12));
     }
+    if(quality==2) {
+        for(int i=0;i<28;++i) {
+            const float x=-13.8f+static_cast<float>(i%14)*2.12f;
+            const float z=(i<14?-7.8f:7.8f);
+            const float y=TerrainHeight(x,z);
+            mesh.Sphere(x,y+0.035f,z,0.11f,0.045f,0.16f,
+                        (i%2)?LEAF_B:ROCK_DARK,4,6);
+        }
+    }
+}
+
+
+
+void BuildSupportRing(MeshBuilder& mesh,float x,float y,float z,float pulse,int quality) {
+    if(pulse<=0.0f) return;
+    const int segments=quality==0?10:(quality==1?16:28);
+    const float alpha=std::clamp(pulse/0.18f,0.0f,1.0f)*0.62f;
+    const XMFLOAT4 glow{0.22f,0.82f,0.48f,alpha};
+    const float inner=0.62f,outer=0.78f;
+    for(int i=0;i<segments;++i) {
+        const float a0=2.0f*PI*i/segments,a1=2.0f*PI*(i+1)/segments;
+        const XMFLOAT3 p0{x+std::cos(a0)*inner,y,z+std::sin(a0)*inner};
+        const XMFLOAT3 p1{x+std::cos(a0)*outer,y,z+std::sin(a0)*outer};
+        const XMFLOAT3 p2{x+std::cos(a1)*outer,y,z+std::sin(a1)*outer};
+        const XMFLOAT3 p3{x+std::cos(a1)*inner,y,z+std::sin(a1)*inner};
+        mesh.Quad(p0,p1,p2,p3,glow);
+    }
+}
+
+void BuildPerson(MeshBuilder& mesh,const UnitView& unit,int quality,float time) {
+    const float x=unit.x,z=unit.z;
+    const float ground=TerrainHeight(x,z);
+    const float yaw=unit.heading;
+    const XMFLOAT4 team=unit.team==0?XMFLOAT4{0.12f,0.34f,0.76f,1.0f}:XMFLOAT4{0.76f,0.16f,0.13f,1.0f};
+    const XMFLOAT4 armorLight=unit.team==0?XMFLOAT4{0.25f,0.52f,0.91f,1.0f}:XMFLOAT4{0.91f,0.34f,0.26f,1.0f};
+    const XMFLOAT4 dark{0.16f,0.18f,0.19f,1.0f};
+    const XMFLOAT4 skin{0.68f,0.48f,0.34f,1.0f};
+    const float phase=time*5.2f+x*0.71f+z*0.43f;
+    const float walk=std::sin(phase)*0.055f;
+    mesh.Sphere(x,ground+0.035f,z,0.34f,0.022f,0.42f,XMFLOAT4{0.12f,0.13f,0.12f,0.24f},
+                quality==0?5:(quality==1?7:10),quality==0?7:(quality==1?9:14));
+    mesh.BoxYaw(x,ground+0.70f,z,0.46f,0.52f,0.30f,yaw,team);
+    mesh.BoxYaw(x,ground+0.79f,z+0.025f,0.49f,0.16f,0.32f,yaw,armorLight);
+    mesh.Sphere(x,ground+1.12f,z,0.20f,0.22f,0.20f,skin,
+                quality==0?6:(quality==1?8:12),quality==0?8:(quality==1?10:16));
+    mesh.BoxYaw(x-0.14f,ground+0.28f+walk,z,0.16f,0.48f,0.18f,yaw,dark);
+    mesh.BoxYaw(x+0.14f,ground+0.28f-walk,z,0.16f,0.48f,0.18f,yaw,dark);
+    mesh.BoxYaw(x-0.30f,ground+0.70f-walk,z+0.02f,0.14f,0.40f,0.16f,yaw,armorLight);
+    mesh.BoxYaw(x+0.30f,ground+0.70f+walk,z+0.02f,0.14f,0.40f,0.16f,yaw,armorLight);
+    mesh.BoxYaw(x,ground+0.73f,z-0.22f,0.30f,0.39f,0.13f,yaw,dark);
+
+    if(unit.kind==1) { // Medic: pale field cap and a clear medical marking.
+        const XMFLOAT4 white{0.88f,0.90f,0.86f,1.0f};
+        const XMFLOAT4 mark{0.78f,0.13f,0.12f,1.0f};
+        mesh.BoxYaw(x,ground+1.34f,z,0.28f,0.10f,0.26f,yaw,white);
+        mesh.BoxYaw(x,ground+0.72f,z+0.17f,0.075f,0.24f,0.035f,yaw,mark);
+        mesh.BoxYaw(x,ground+0.72f,z+0.17f,0.22f,0.075f,0.035f,yaw,mark);
+    } else if(unit.kind==2) { // Engineer: work helmet and a compact tool pack.
+        const XMFLOAT4 helmet{0.77f,0.61f,0.18f,1.0f};
+        mesh.Sphere(x,ground+1.34f,z,0.23f,0.085f,0.22f,helmet,quality==2?10:6,quality==2?14:8);
+        mesh.BoxYaw(x,ground+0.78f,z-0.27f,0.34f,0.34f,0.19f,yaw,
+                    XMFLOAT4{0.34f,0.31f,0.23f,1.0f});
+        mesh.BoxYaw(x+0.22f,ground+0.57f,z+0.16f,0.11f,0.19f,0.09f,yaw,
+                    XMFLOAT4{0.62f,0.58f,0.47f,1.0f});
+    } else {
+        mesh.BoxYaw(x,ground+1.33f,z,0.30f,0.09f,0.29f,yaw,dark);
+    }
+    BuildSupportRing(mesh,x,ground+0.06f,z,unit.supportPulse,quality);
+}
+
+void BuildSupplyTruck(MeshBuilder& mesh,const UnitView& unit,int quality) {
+    const float x=unit.x,z=unit.z;
+    const float ground=TerrainHeight(x,z);
+    const float yaw=unit.heading;
+    const XMFLOAT4 team=unit.team==0?XMFLOAT4{0.14f,0.38f,0.78f,1.0f}:XMFLOAT4{0.78f,0.18f,0.15f,1.0f};
+    const XMFLOAT4 trim{0.20f,0.22f,0.21f,1.0f};
+    const XMFLOAT4 glass{0.43f,0.62f,0.70f,1.0f};
+    mesh.Sphere(x,ground+0.045f,z,0.62f,0.025f,0.88f,XMFLOAT4{0.10f,0.11f,0.10f,0.24f},
+                quality==0?5:(quality==1?7:10),quality==0?7:(quality==1?9:14));
+    mesh.BoxYaw(x,ground+0.40f,z,0.88f,0.42f,1.48f,yaw,team);
+    mesh.BoxYaw(x,ground+0.72f,z+0.34f,0.79f,0.49f,0.66f,yaw,team);
+    mesh.BoxYaw(x,ground+0.77f,z+0.69f,0.58f,0.22f,0.035f,yaw,glass);
+    mesh.BoxYaw(x,ground+0.66f,z-0.35f,0.76f,0.38f,0.67f,yaw,
+                XMFLOAT4{0.73f,0.72f,0.64f,1.0f});
+    mesh.BoxYaw(x,ground+0.91f,z-0.35f,0.78f,0.06f,0.68f,yaw,trim);
+    for(float side:{-1.0f,1.0f}) {
+        for(float forward:{-0.48f,0.48f}) {
+            mesh.Sphere(x+side*0.43f,ground+0.22f,z+forward,0.17f,0.18f,0.17f,trim,
+                        quality==2?10:6,quality==2?14:8);
+            if(quality>0) {
+                mesh.Sphere(x+side*0.43f,ground+0.22f,z+forward,0.075f,0.08f,0.075f,
+                            XMFLOAT4{0.56f,0.57f,0.53f,1.0f},6,8);
+            }
+        }
+    }
+    BuildSupportRing(mesh,x,ground+0.055f,z,unit.supportPulse,quality);
 }
 
 class Renderer {
@@ -217,22 +341,38 @@ public:
         }
         if(FAILED(hr)) return false;
         if(!CreateShaders() || !CreateBuffers() || !CreateStates()) return false;
+        SelectSampleCount();
         RECT client{};GetClientRect(hwnd,&client);
         return Resize(static_cast<UINT>(client.right-client.left),static_cast<UINT>(client.bottom-client.top));
     }
 
     bool Resize(UINT width,UINT height) {
         if(!swapChain || !width || !height) return true;
-        renderTarget.Reset();depthView.Reset();depthTexture.Reset();
+        renderWidth=width;renderHeight=height;
+        if(context) context->OMSetRenderTargets(0,nullptr,nullptr);
+        renderTarget.Reset();sceneColorTexture.Reset();depthView.Reset();depthTexture.Reset();
         HRESULT hr=swapChain->ResizeBuffers(0,width,height,DXGI_FORMAT_UNKNOWN,0);
         if(FAILED(hr)) return false;
         ComPtr<ID3D11Texture2D> backBuffer;
         hr=swapChain->GetBuffer(0,IID_PPV_ARGS(&backBuffer));if(FAILED(hr))return false;
-        hr=device->CreateRenderTargetView(backBuffer.Get(),nullptr,&renderTarget);if(FAILED(hr))return false;
+
+        if(sampleCount==1) {
+            hr=device->CreateRenderTargetView(backBuffer.Get(),nullptr,&renderTarget);
+            if(FAILED(hr))return false;
+        } else {
+            D3D11_TEXTURE2D_DESC colorDesc{};
+            colorDesc.Width=width;colorDesc.Height=height;colorDesc.MipLevels=1;colorDesc.ArraySize=1;
+            colorDesc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;
+            colorDesc.SampleDesc.Count=sampleCount;colorDesc.SampleDesc.Quality=0;
+            colorDesc.Usage=D3D11_USAGE_DEFAULT;colorDesc.BindFlags=D3D11_BIND_RENDER_TARGET;
+            hr=device->CreateTexture2D(&colorDesc,nullptr,&sceneColorTexture);if(FAILED(hr))return false;
+            hr=device->CreateRenderTargetView(sceneColorTexture.Get(),nullptr,&renderTarget);if(FAILED(hr))return false;
+        }
 
         D3D11_TEXTURE2D_DESC depthDesc{};
         depthDesc.Width=width;depthDesc.Height=height;depthDesc.MipLevels=1;depthDesc.ArraySize=1;
-        depthDesc.Format=DXGI_FORMAT_D24_UNORM_S8_UINT;depthDesc.SampleDesc.Count=1;
+        depthDesc.Format=DXGI_FORMAT_D24_UNORM_S8_UINT;
+        depthDesc.SampleDesc.Count=sampleCount;depthDesc.SampleDesc.Quality=0;
         depthDesc.Usage=D3D11_USAGE_DEFAULT;depthDesc.BindFlags=D3D11_BIND_DEPTH_STENCIL;
         hr=device->CreateTexture2D(&depthDesc,nullptr,&depthTexture);if(FAILED(hr))return false;
         hr=device->CreateDepthStencilView(depthTexture.Get(),nullptr,&depthView);if(FAILED(hr))return false;
@@ -241,7 +381,19 @@ public:
         return true;
     }
 
-    void Render(const UnitView* units,UINT unitCount) {
+    bool SetQuality(int value) {
+        const int next=std::clamp(value,0,2);
+        if(next==quality)return true;
+        quality=next;
+        SelectSampleCount();
+        if(!RebuildWorldBuffer())return false;
+        return Resize(renderWidth,renderHeight);
+    }
+
+    int Quality() const { return quality; }
+    UINT Samples() const { return sampleCount; }
+
+    void Render(const UnitView* units,UINT unitCount,float time) {
         if(!context || !renderTarget || !depthView) return;
         const float white[4]={1.0f,1.0f,1.0f,1.0f};
         context->OMSetRenderTargets(1,renderTarget.GetAddressOf(),depthView.Get());
@@ -262,16 +414,29 @@ public:
         XMMATRIX projection=XMMatrixPerspectiveFovLH(XMConvertToRadians(43.0f),aspect,0.1f,150.0f);
         MatrixBuffer matrices{};
         XMStoreFloat4x4(&matrices.viewProjection,view*projection);
+        matrices.lighting=XMFLOAT4{
+            quality==0?0.045f:(quality==1?0.12f:0.22f),
+            quality==0?16.0f:(quality==1?28.0f:48.0f),
+            0.0f,0.0f
+        };
         context->UpdateSubresource(constantBuffer.Get(),0,nullptr,&matrices,0,0);
 
         const UINT stride=sizeof(Vertex),offset=0;
         context->IASetVertexBuffers(0,1,staticVertexBuffer.GetAddressOf(),&stride,&offset);
         context->Draw(staticVertexCount,0);
 
-        UpdateTroops(units,unitCount);
+        UpdateTroops(units,unitCount,time);
         if(dynamicVertexCount>0) {
+            context->OMSetBlendState(alphaBlend.Get(),nullptr,0xffffffff);
             context->IASetVertexBuffers(0,1,dynamicVertexBuffer.GetAddressOf(),&stride,&offset);
             context->Draw(dynamicVertexCount,0);
+            context->OMSetBlendState(nullptr,nullptr,0xffffffff);
+        }
+        if(sampleCount>1) {
+            ComPtr<ID3D11Texture2D> backBuffer;
+            if(SUCCEEDED(swapChain->GetBuffer(0,IID_PPV_ARGS(&backBuffer)))) {
+                context->ResolveSubresource(backBuffer.Get(),0,sceneColorTexture.Get(),0,DXGI_FORMAT_R8G8B8A8_UNORM);
+            }
         }
         swapChain->Present(1,0);
     }
@@ -283,19 +448,30 @@ private:
 
     bool CreateShaders() {
         static const char* shader=R"(
-cbuffer Scene : register(b0) { row_major float4x4 viewProjection; };
+cbuffer Scene : register(b0) {
+    row_major float4x4 viewProjection;
+    float4 lighting;
+};
 struct VSInput { float3 position : POSITION; float3 normal : NORMAL; float4 color : COLOR; };
-struct PSInput { float4 position : SV_POSITION; float4 color : COLOR; };
+struct PSInput { float4 position : SV_POSITION; float3 normal : NORMAL; float4 color : COLOR; };
 PSInput VSMain(VSInput input) {
     PSInput output;
     output.position = mul(float4(input.position,1.0f),viewProjection);
-    float3 lightDirection = normalize(float3(-0.45f,1.0f,-0.35f));
-    float diffuse = saturate(abs(dot(normalize(input.normal),lightDirection)));
-    float lighting = 0.34f + 0.66f*diffuse;
-    output.color = float4(input.color.rgb*lighting,input.color.a);
+    output.normal = input.normal;
+    output.color = input.color;
     return output;
 }
-float4 PSMain(PSInput input) : SV_TARGET { return input.color; }
+float4 PSMain(PSInput input) : SV_TARGET {
+    float3 n = normalize(input.normal);
+    float3 l = normalize(float3(-0.45f,1.0f,-0.35f));
+    float3 v = normalize(float3(0.0f,0.72f,-1.0f));
+    float3 h = normalize(l+v);
+    float diffuse = saturate(abs(dot(n,l)));
+    float specular = pow(saturate(abs(dot(n,h))),lighting.y)*lighting.x;
+    float ambient = 0.26f + 0.16f*saturate(abs(n.y));
+    float3 color = input.color.rgb*(ambient+0.72f*diffuse)+specular.xxx;
+    return float4(saturate(color),input.color.a);
+}
 )";
         ComPtr<ID3DBlob> vsBlob,psBlob,errors;
         HRESULT hr=D3DCompile(shader,std::strlen(shader),"Conflict3D",nullptr,nullptr,"VSMain","vs_5_0",
@@ -317,27 +493,45 @@ float4 PSMain(PSInput input) : SV_TARGET { return input.color; }
         return SUCCEEDED(hr);
     }
 
-    bool CreateBuffers() {
+    bool RebuildWorldBuffer() {
         MeshBuilder world;
-        BuildWorld(world);
+        BuildWorld(world,quality);
         if(world.vertices.empty())return false;
         D3D11_BUFFER_DESC desc{};
         desc.ByteWidth=static_cast<UINT>(world.vertices.size()*sizeof(Vertex));
         desc.Usage=D3D11_USAGE_IMMUTABLE;
         desc.BindFlags=D3D11_BIND_VERTEX_BUFFER;
         D3D11_SUBRESOURCE_DATA data{};data.pSysMem=world.vertices.data();
-        HRESULT hr=device->CreateBuffer(&desc,&data,&staticVertexBuffer);if(FAILED(hr))return false;
+        ComPtr<ID3D11Buffer> next;
+        HRESULT hr=device->CreateBuffer(&desc,&data,&next);
+        if(FAILED(hr))return false;
+        staticVertexBuffer=std::move(next);
         staticVertexCount=static_cast<UINT>(world.vertices.size());
+        return true;
+    }
 
-        MeshBuilder sphere;
-        sphere.Sphere(0,0,0,1,1,1,XMFLOAT4{1,1,1,1},9,12);
-        unitSphere=std::move(sphere.vertices);
+    void SelectSampleCount() {
+        const UINT wanted=quality==0?1u:(quality==1?2u:4u);
+        sampleCount=1;
+        for(UINT candidate=wanted;candidate>=2;candidate/=2) {
+            UINT colorLevels=0,depthLevels=0;
+            const HRESULT color=device->CheckMultisampleQualityLevels(DXGI_FORMAT_R8G8B8A8_UNORM,candidate,&colorLevels);
+            const HRESULT depth=device->CheckMultisampleQualityLevels(DXGI_FORMAT_D24_UNORM_S8_UINT,candidate,&depthLevels);
+            if(SUCCEEDED(color)&&SUCCEEDED(depth)&&colorLevels>0&&depthLevels>0) {
+                sampleCount=candidate;
+                break;
+            }
+        }
+    }
+
+    bool CreateBuffers() {
+        if(!RebuildWorldBuffer())return false;
         D3D11_BUFFER_DESC dynamicDesc{};
-        dynamicDesc.ByteWidth=static_cast<UINT>(MAX_UNITS*unitSphere.size()*sizeof(Vertex));
+        dynamicDesc.ByteWidth=MAX_DYNAMIC_VERTICES*sizeof(Vertex);
         dynamicDesc.Usage=D3D11_USAGE_DYNAMIC;
         dynamicDesc.BindFlags=D3D11_BIND_VERTEX_BUFFER;
         dynamicDesc.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;
-        hr=device->CreateBuffer(&dynamicDesc,nullptr,&dynamicVertexBuffer);if(FAILED(hr))return false;
+        HRESULT hr=device->CreateBuffer(&dynamicDesc,nullptr,&dynamicVertexBuffer);if(FAILED(hr))return false;
 
         D3D11_BUFFER_DESC cb{};
         cb.ByteWidth=sizeof(MatrixBuffer);cb.Usage=D3D11_USAGE_DEFAULT;cb.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
@@ -350,39 +544,49 @@ float4 PSMain(PSInput input) : SV_TARGET { return input.color; }
         raster.FillMode=D3D11_FILL_SOLID;
         raster.CullMode=D3D11_CULL_NONE;
         raster.DepthClipEnable=TRUE;
+        raster.MultisampleEnable=TRUE;
+        raster.AntialiasedLineEnable=TRUE;
         HRESULT hr=device->CreateRasterizerState(&raster,&rasterizer);if(FAILED(hr))return false;
         D3D11_DEPTH_STENCIL_DESC depth{};
         depth.DepthEnable=TRUE;depth.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ALL;depth.DepthFunc=D3D11_COMPARISON_LESS_EQUAL;
-        return SUCCEEDED(device->CreateDepthStencilState(&depth,&depthState));
+        hr=device->CreateDepthStencilState(&depth,&depthState);if(FAILED(hr))return false;
+
+        D3D11_BLEND_DESC blend{};
+        auto& rt=blend.RenderTarget[0];
+        rt.BlendEnable=TRUE;
+        rt.SrcBlend=D3D11_BLEND_SRC_ALPHA;
+        rt.DestBlend=D3D11_BLEND_INV_SRC_ALPHA;
+        rt.BlendOp=D3D11_BLEND_OP_ADD;
+        rt.SrcBlendAlpha=D3D11_BLEND_ONE;
+        rt.DestBlendAlpha=D3D11_BLEND_INV_SRC_ALPHA;
+        rt.BlendOpAlpha=D3D11_BLEND_OP_ADD;
+        rt.RenderTargetWriteMask=D3D11_COLOR_WRITE_ENABLE_ALL;
+        return SUCCEEDED(device->CreateBlendState(&blend,&alphaBlend));
     }
 
-    void UpdateTroops(const UnitView* units,UINT count) {
+    void UpdateTroops(const UnitView* units,UINT count,float time) {
         dynamicVertexCount=0;
         if(!units || !count)return;
-        D3D11_MAPPED_SUBRESOURCE mapped{};
-        if(FAILED(context->Map(dynamicVertexBuffer.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mapped)))return;
-        auto* output=static_cast<Vertex*>(mapped.pData);
-        const XMFLOAT4 blue{0.16f,0.43f,0.93f,1.0f};
-        const XMFLOAT4 red{0.91f,0.23f,0.18f,1.0f};
+        MeshBuilder models;
         const UINT limit=std::min(count,MAX_UNITS);
         for(UINT i=0;i<limit;++i) {
             if(!units[i].alive)continue;
-            const float x=units[i].x,z=units[i].z;
-            const float y=TerrainHeight(x,z)+0.27f;
-            const XMFLOAT4 color=units[i].team==0?blue:red;
-            for(const auto& v:unitSphere) {
-                Vertex out=v;
-                out.position.x=x+v.position.x*0.25f;
-                out.position.y=y+v.position.y*0.25f;
-                out.position.z=z+v.position.z*0.25f;
-                out.color=color;
-                output[dynamicVertexCount++]=out;
-            }
+            if(units[i].kind==3) BuildSupplyTruck(models,units[i],quality);
+            else BuildPerson(models,units[i],quality,time);
         }
+        if(models.vertices.empty())return;
+        dynamicVertexCount=static_cast<UINT>(std::min(models.vertices.size(),static_cast<std::size_t>(MAX_DYNAMIC_VERTICES)));
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        if(FAILED(context->Map(dynamicVertexBuffer.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mapped))) {
+            dynamicVertexCount=0;
+            return;
+        }
+        std::memcpy(mapped.pData,models.vertices.data(),dynamicVertexCount*sizeof(Vertex));
         context->Unmap(dynamicVertexBuffer.Get(),0);
     }
 
     ComPtr<ID3D11RenderTargetView> renderTarget;
+    ComPtr<ID3D11Texture2D> sceneColorTexture;
     ComPtr<ID3D11Texture2D> depthTexture;
     ComPtr<ID3D11DepthStencilView> depthView;
     ComPtr<ID3D11VertexShader> vertexShader;
@@ -391,8 +595,11 @@ float4 PSMain(PSInput input) : SV_TARGET { return input.color; }
     ComPtr<ID3D11Buffer> staticVertexBuffer,dynamicVertexBuffer,constantBuffer;
     ComPtr<ID3D11RasterizerState> rasterizer;
     ComPtr<ID3D11DepthStencilState> depthState;
-    std::vector<Vertex> unitSphere;
+    ComPtr<ID3D11BlendState> alphaBlend;
+    static constexpr UINT MAX_DYNAMIC_VERTICES=MAX_UNITS*2048;
     UINT staticVertexCount=0,dynamicVertexCount=0;
+    UINT sampleCount=1,renderWidth=0,renderHeight=0;
+    int quality=1;
     float aspect=16.0f/9.0f;
     D3D11_VIEWPORT viewport{};
 };
@@ -461,6 +668,13 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT message,WPARAM wParam,LPARAM lParam) 
     case WM_KEYDOWN:
         if(wParam==VK_F11)ToggleBorderless(hwnd);
         else if(wParam==VK_ESCAPE&&borderless)ToggleBorderless(hwnd);
+        else if(wParam==VK_F1&&renderer) {
+            if(renderer->SetQuality(0))SetWindowTextW(hwnd,L"CONFLICT | GRAFICOS: BAJOS (F1/F2/F3)");
+        } else if(wParam==VK_F2&&renderer) {
+            if(renderer->SetQuality(1))SetWindowTextW(hwnd,L"CONFLICT | GRAFICOS: MEDIOS (F1/F2/F3)");
+        } else if(wParam==VK_F3&&renderer) {
+            if(renderer->SetQuality(2))SetWindowTextW(hwnd,L"CONFLICT | GRAFICOS: ALTOS (F1/F2/F3)");
+        }
         return 0;
     case WM_GETMINMAXINFO: {
         auto* info=reinterpret_cast<MINMAXINFO*>(lParam);
@@ -483,7 +697,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR,int show) {
     if(!RegisterClassExW(&wc))return 1;
 
     RECT bounds{0,0,1440,900};AdjustWindowRect(&bounds,WS_OVERLAPPEDWINDOW,FALSE);
-    HWND hwnd=CreateWindowExW(0,WINDOW_CLASS,L"CONFLICT",WS_OVERLAPPEDWINDOW,
+    HWND hwnd=CreateWindowExW(0,WINDOW_CLASS,L"CONFLICT | GRAFICOS: MEDIOS (F1/F2/F3)",WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT,CW_USEDEFAULT,bounds.right-bounds.left,bounds.bottom-bounds.top,
         nullptr,nullptr,instance,nullptr);
     if(!hwnd)return 1;
@@ -520,7 +734,8 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR,int show) {
 
         rustUpdate(dt);
         const std::size_t count=rustGetUnits(unitBuffer,MAX_UNITS);
-        graphics.Render(unitBuffer,static_cast<UINT>(std::min(count,static_cast<std::size_t>(MAX_UNITS))));
+        const float elapsed=std::chrono::duration<float>(now.time_since_epoch()).count();
+        graphics.Render(unitBuffer,static_cast<UINT>(std::min(count,static_cast<std::size_t>(MAX_UNITS))),elapsed);
         Sleep(1);
     }
     renderer=nullptr;
