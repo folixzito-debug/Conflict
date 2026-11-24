@@ -1,4 +1,4 @@
-name: Build Conflict 0.4.0 for Windows
+name: Build Conflict 0.5.0 3D for Windows
 on:
   push:
     branches: [main, master]
@@ -13,11 +13,11 @@ jobs:
         uses: actions/checkout@v4
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
-      - name: Test Rust simulation
+      - name: Test real-time simulation
         run: cargo test --manifest-path rust/Cargo.toml
       - name: Configure
         run: cmake -S . -B build -A x64
-      - name: Build C++ and Rust
+      - name: Build C++ 3D renderer and Rust simulation
         run: cmake --build build --config Release
       - name: Verify Windows binaries
         shell: pwsh
@@ -39,15 +39,15 @@ jobs:
           Copy-Item build/Release/Conflict.exe package/
           Copy-Item build/Release/conflict_core.dll package/
           Copy-Item README.md package/
-          Compress-Archive -Path package/* -DestinationPath Conflict-0.4.0-Windows.zip -Force
+          Compress-Archive -Path package/* -DestinationPath Conflict-0.5.0-Windows.zip -Force
       - name: Upload build
         uses: actions/upload-artifact@v4
         with:
-          name: Conflict-0.4.0-Windows
+          name: Conflict-0.5.0-Windows
           path: |
             build/Release/Conflict.exe
             build/Release/conflict_core.dll
-            Conflict-0.4.0-Windows.zip
+            Conflict-0.5.0-Windows.zip
           if-no-files-found: error
       - name: Publish tagged release
         if: startsWith(github.ref, 'refs/tags/v')
@@ -56,4 +56,4 @@ jobs:
           files: |
             build/Release/Conflict.exe
             build/Release/conflict_core.dll
-            Conflict-0.4.0-Windows.zip
+            Conflict-0.5.0-Windows.zip
