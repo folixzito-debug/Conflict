@@ -14,6 +14,8 @@
 #include <string>
 #include <vector>
 #include <utility>
+#include <limits>
+#include <thread>
 
 using Microsoft::WRL::ComPtr;
 using namespace DirectX;
@@ -162,7 +164,7 @@ void BuildTree(MeshBuilder& mesh,float x,float z,float scale,int quality) {
         mesh.Sphere(x+0.39f*scale,ground+1.78f*scale,z-0.18f*scale,
                     0.55f*scale,0.63f*scale,0.53f*scale,LEAF_C,rings-1,slices-1);
     }
-    if(quality==2) {
+    if(quality>=2) {
         mesh.Sphere(x,ground+2.42f*scale,z,0.42f*scale,0.45f*scale,0.42f*scale,LEAF_C,7,10);
     }
 }
@@ -179,8 +181,8 @@ void BuildWorld(MeshBuilder& mesh,int quality) {
     }
 
     // Uneven soil plane with smooth rolling ground.
-    const int NX=quality==0?24:(quality==1?48:80);
-    const int NZ=quality==0?18:(quality==1?36:60);
+    const int NX=quality==0?24:(quality==1?48:(quality==2?80:120));
+    const int NZ=quality==0?18:(quality==1?36:(quality==2?60:90));
     constexpr float XMIN=-14.7f, XMAX=14.7f, ZMIN=-10.7f, ZMAX=10.7f;
     for(int iz=0;iz<NZ;++iz) {
         for(int ix=0;ix<NX;++ix) {
@@ -248,73 +250,43 @@ void BuildSupportRing(MeshBuilder& mesh,float x,float y,float z,float pulse,int 
     }
 }
 
-void BuildPerson(MeshBuilder& mesh,const UnitView& unit,int quality,float time) {
-    const float x=unit.x,z=unit.z;
-    const float ground=TerrainHeight(x,z);
-    const float yaw=unit.heading;
+void BuildSphereUnit(MeshBuilder& mesh,const UnitView& unit,int quality,float time) {
+    const float x=unit.x,z=unit.z,ground=TerrainHeight(x,z),yaw=unit.heading;
     const XMFLOAT4 team=unit.team==0?XMFLOAT4{0.12f,0.34f,0.76f,1.0f}:XMFLOAT4{0.76f,0.16f,0.13f,1.0f};
-    const XMFLOAT4 armorLight=unit.team==0?XMFLOAT4{0.25f,0.52f,0.91f,1.0f}:XMFLOAT4{0.91f,0.34f,0.26f,1.0f};
-    const XMFLOAT4 dark{0.16f,0.18f,0.19f,1.0f};
-    const XMFLOAT4 skin{0.68f,0.48f,0.34f,1.0f};
-    const float phase=time*5.2f+x*0.71f+z*0.43f;
-    const float walk=std::sin(phase)*0.055f;
-    mesh.Sphere(x,ground+0.035f,z,0.34f,0.022f,0.42f,XMFLOAT4{0.12f,0.13f,0.12f,0.24f},
-                quality==0?5:(quality==1?7:10),quality==0?7:(quality==1?9:14));
-    mesh.BoxYaw(x,ground+0.70f,z,0.46f,0.52f,0.30f,yaw,team);
-    mesh.BoxYaw(x,ground+0.79f,z+0.025f,0.49f,0.16f,0.32f,yaw,armorLight);
-    mesh.Sphere(x,ground+1.12f,z,0.20f,0.22f,0.20f,skin,
-                quality==0?6:(quality==1?8:12),quality==0?8:(quality==1?10:16));
-    mesh.BoxYaw(x-0.14f,ground+0.28f+walk,z,0.16f,0.48f,0.18f,yaw,dark);
-    mesh.BoxYaw(x+0.14f,ground+0.28f-walk,z,0.16f,0.48f,0.18f,yaw,dark);
-    mesh.BoxYaw(x-0.30f,ground+0.70f-walk,z+0.02f,0.14f,0.40f,0.16f,yaw,armorLight);
-    mesh.BoxYaw(x+0.30f,ground+0.70f+walk,z+0.02f,0.14f,0.40f,0.16f,yaw,armorLight);
-    mesh.BoxYaw(x,ground+0.73f,z-0.22f,0.30f,0.39f,0.13f,yaw,dark);
+    const XMFLOAT4 bright=unit.team==0?XMFLOAT4{0.30f,0.56f,0.96f,1.0f}:XMFLOAT4{0.98f,0.37f,0.29f,1.0f};
+    const XMFLOAT4 dark{0.10f,0.12f,0.14f,1.0f};
+    const XMFLOAT4 steel{0.72f,0.77f,0.80f,1.0f};
+    const int rings=quality==0?7:(quality==1?10:(quality==2?14:20));
+    const int slices=quality==0?10:(quality==1?14:(quality==2?20:28));
+    mesh.Sphere(x,ground+0.045f,z,0.49f,0.035f,0.49f,XMFLOAT4{0.10f,0.11f,0.10f,0.28f},rings,slices);
+    mesh.Sphere(x,ground+0.43f,z,0.38f,0.38f,0.38f,team,rings,slices);
+    // A small team-coloured badge sits on the front of every sphere.
+    mesh.BoxYaw(x,ground+0.43f,z+0.365f,0.19f,0.075f,0.035f,yaw,bright);
 
-    if(unit.kind==1) { // Medic: pale field cap and a clear medical marking.
-        const XMFLOAT4 white{0.88f,0.90f,0.86f,1.0f};
-        const XMFLOAT4 mark{0.78f,0.13f,0.12f,1.0f};
-        mesh.BoxYaw(x,ground+1.34f,z,0.28f,0.10f,0.26f,yaw,white);
-        mesh.BoxYaw(x,ground+0.72f,z+0.17f,0.075f,0.24f,0.035f,yaw,mark);
-        mesh.BoxYaw(x,ground+0.72f,z+0.17f,0.22f,0.075f,0.035f,yaw,mark);
-    } else if(unit.kind==2) { // Engineer: work helmet and a compact tool pack.
-        const XMFLOAT4 helmet{0.77f,0.61f,0.18f,1.0f};
-        mesh.Sphere(x,ground+1.34f,z,0.23f,0.085f,0.22f,helmet,quality==2?10:6,quality==2?14:8);
-        mesh.BoxYaw(x,ground+0.78f,z-0.27f,0.34f,0.34f,0.19f,yaw,
-                    XMFLOAT4{0.34f,0.31f,0.23f,1.0f});
-        mesh.BoxYaw(x+0.22f,ground+0.57f,z+0.16f,0.11f,0.19f,0.09f,yaw,
-                    XMFLOAT4{0.62f,0.58f,0.47f,1.0f});
-    } else {
-        mesh.BoxYaw(x,ground+1.33f,z,0.30f,0.09f,0.29f,yaw,dark);
+    if(unit.kind==1) { // Medical kit: white case with a clear red cross.
+        const XMFLOAT4 white{0.92f,0.94f,0.91f,1.0f},red{0.84f,0.12f,0.12f,1.0f};
+        mesh.BoxYaw(x+0.34f,ground+0.42f,z+0.02f,0.34f,0.25f,0.23f,yaw,white);
+        mesh.BoxYaw(x+0.34f,ground+0.42f,z+0.145f,0.075f,0.19f,0.025f,yaw,red);
+        mesh.BoxYaw(x+0.34f,ground+0.42f,z+0.145f,0.21f,0.065f,0.025f,yaw,red);
+        mesh.BoxYaw(x+0.34f,ground+0.565f,z+0.02f,0.18f,0.045f,0.10f,yaw,dark);
+        BuildSupportRing(mesh,x,ground+0.06f,z,unit.supportPulse,quality);
+    } else if(unit.kind==2) { // Small, stylised catapult mounted beside the sphere.
+        const XMFLOAT4 wood{0.39f,0.23f,0.12f,1.0f},rope{0.72f,0.61f,0.43f,1.0f};
+        mesh.BoxYaw(x+0.36f,ground+0.25f,z-0.02f,0.48f,0.11f,0.35f,yaw,wood);
+        mesh.BoxYaw(x+0.36f,ground+0.49f,z-0.02f,0.09f,0.43f,0.10f,yaw,wood);
+        mesh.BoxYaw(x+0.36f,ground+0.69f,z+0.08f,0.08f,0.32f,0.09f,yaw,rope);
+        mesh.Sphere(x+0.36f,ground+0.88f,z+0.20f,0.12f,0.12f,0.12f,ROCK_DARK,6,8);
+        mesh.Cylinder(x+0.36f,ground+0.20f,z-0.02f,0.12f,0.055f,dark,quality==3?16:8);
+    } else if(unit.kind==3) { // Modern class remains a sphere; only a compact equipment pack is added.
+        mesh.BoxYaw(x,ground+0.43f,z-0.39f,0.28f,0.30f,0.13f,yaw,dark);
+        mesh.BoxYaw(x+0.12f,ground+0.68f,z-0.39f,0.045f,0.23f,0.045f,yaw,steel);
+        mesh.Sphere(x+0.12f,ground+0.81f,z-0.39f,0.055f,0.055f,0.055f,bright,6,8);
+    } else { // Swordsman: a clearly visible, stylised fantasy sword accessory.
+        mesh.BoxYaw(x+0.40f,ground+0.55f,z+0.03f,0.085f,0.54f,0.09f,yaw,steel);
+        mesh.BoxYaw(x+0.40f,ground+0.27f,z+0.03f,0.12f,0.19f,0.12f,yaw,XMFLOAT4{0.39f,0.23f,0.12f,1.0f});
+        mesh.BoxYaw(x+0.40f,ground+0.47f,z+0.03f,0.31f,0.065f,0.13f,yaw,XMFLOAT4{0.82f,0.68f,0.32f,1.0f});
+        mesh.BoxYaw(x+0.40f,ground+0.83f,z+0.03f,0.13f,0.08f,0.13f,yaw,steel);
     }
-    BuildSupportRing(mesh,x,ground+0.06f,z,unit.supportPulse,quality);
-}
-
-void BuildSupplyTruck(MeshBuilder& mesh,const UnitView& unit,int quality) {
-    const float x=unit.x,z=unit.z;
-    const float ground=TerrainHeight(x,z);
-    const float yaw=unit.heading;
-    const XMFLOAT4 team=unit.team==0?XMFLOAT4{0.14f,0.38f,0.78f,1.0f}:XMFLOAT4{0.78f,0.18f,0.15f,1.0f};
-    const XMFLOAT4 trim{0.20f,0.22f,0.21f,1.0f};
-    const XMFLOAT4 glass{0.43f,0.62f,0.70f,1.0f};
-    mesh.Sphere(x,ground+0.045f,z,0.62f,0.025f,0.88f,XMFLOAT4{0.10f,0.11f,0.10f,0.24f},
-                quality==0?5:(quality==1?7:10),quality==0?7:(quality==1?9:14));
-    mesh.BoxYaw(x,ground+0.40f,z,0.88f,0.42f,1.48f,yaw,team);
-    mesh.BoxYaw(x,ground+0.72f,z+0.34f,0.79f,0.49f,0.66f,yaw,team);
-    mesh.BoxYaw(x,ground+0.77f,z+0.69f,0.58f,0.22f,0.035f,yaw,glass);
-    mesh.BoxYaw(x,ground+0.66f,z-0.35f,0.76f,0.38f,0.67f,yaw,
-                XMFLOAT4{0.73f,0.72f,0.64f,1.0f});
-    mesh.BoxYaw(x,ground+0.91f,z-0.35f,0.78f,0.06f,0.68f,yaw,trim);
-    for(float side:{-1.0f,1.0f}) {
-        for(float forward:{-0.48f,0.48f}) {
-            mesh.Sphere(x+side*0.43f,ground+0.22f,z+forward,0.17f,0.18f,0.17f,trim,
-                        quality==2?10:6,quality==2?14:8);
-            if(quality>0) {
-                mesh.Sphere(x+side*0.43f,ground+0.22f,z+forward,0.075f,0.08f,0.075f,
-                            XMFLOAT4{0.56f,0.57f,0.53f,1.0f},6,8);
-            }
-        }
-    }
-    BuildSupportRing(mesh,x,ground+0.055f,z,unit.supportPulse,quality);
 }
 
 class Renderer {
@@ -382,7 +354,7 @@ public:
     }
 
     bool SetQuality(int value) {
-        const int next=std::clamp(value,0,2);
+        const int next=std::clamp(value,0,3);
         if(next==quality)return true;
         quality=next;
         SelectSampleCount();
@@ -392,6 +364,25 @@ public:
 
     int Quality() const { return quality; }
     UINT Samples() const { return sampleCount; }
+
+    void MoveCamera(float forward,float right,float vertical,float dt) {
+        const float speed=12.0f*dt;
+        cameraPosition.x+=(std::sin(cameraYaw)*forward+std::cos(cameraYaw)*right)*speed;
+        cameraPosition.z+=(std::cos(cameraYaw)*forward-std::sin(cameraYaw)*right)*speed;
+        cameraPosition.y+=vertical*speed;
+        cameraPosition.y=std::clamp(cameraPosition.y,2.0f,80.0f);
+    }
+    void RotateCamera(float dx,float dy) {
+        cameraYaw+=dx*0.0045f;
+        cameraPitch=std::clamp(cameraPitch-dy*0.0045f,-1.45f,1.45f);
+    }
+    void ZoomCamera(float amount) {
+        const float cp=std::cos(cameraPitch);
+        cameraPosition.x+=std::sin(cameraYaw)*cp*amount;
+        cameraPosition.y+=std::sin(cameraPitch)*amount;
+        cameraPosition.z+=std::cos(cameraYaw)*cp*amount;
+        cameraPosition.y=std::clamp(cameraPosition.y,2.0f,80.0f);
+    }
 
     void Render(const UnitView* units,UINT unitCount,float time) {
         if(!context || !renderTarget || !depthView) return;
@@ -408,15 +399,17 @@ public:
         context->PSSetShader(pixelShader.Get(),nullptr,0);
         context->VSSetConstantBuffers(0,1,constantBuffer.GetAddressOf());
 
-        XMVECTOR eye=XMVectorSet(0.0f,24.0f,-36.0f,1.0f);
-        XMVECTOR focus=XMVectorSet(0.0f,0.0f,0.0f,1.0f);
+        XMVECTOR eye=XMVectorSet(cameraPosition.x,cameraPosition.y,cameraPosition.z,1.0f);
+        const float cp=std::cos(cameraPitch);
+        XMVECTOR direction=XMVectorSet(std::sin(cameraYaw)*cp,std::sin(cameraPitch),std::cos(cameraYaw)*cp,0.0f);
+        XMVECTOR focus=XMVectorAdd(eye,direction);
         XMMATRIX view=XMMatrixLookAtLH(eye,focus,XMVectorSet(0.0f,1.0f,0.0f,0.0f));
         XMMATRIX projection=XMMatrixPerspectiveFovLH(XMConvertToRadians(43.0f),aspect,0.1f,150.0f);
         MatrixBuffer matrices{};
         XMStoreFloat4x4(&matrices.viewProjection,view*projection);
         matrices.lighting=XMFLOAT4{
-            quality==0?0.045f:(quality==1?0.12f:0.22f),
-            quality==0?16.0f:(quality==1?28.0f:48.0f),
+            quality==0?0.035f:(quality==1?0.10f:(quality==2?0.18f:0.26f)),
+            quality==0?12.0f:(quality==1?24.0f:(quality==2?40.0f:64.0f)),
             0.0f,0.0f
         };
         context->UpdateSubresource(constantBuffer.Get(),0,nullptr,&matrices,0,0);
@@ -438,7 +431,7 @@ public:
                 context->ResolveSubresource(backBuffer.Get(),0,sceneColorTexture.Get(),0,DXGI_FORMAT_R8G8B8A8_UNORM);
             }
         }
-        swapChain->Present(1,0);
+        swapChain->Present(0,0);
     }
 
 private:
@@ -511,7 +504,7 @@ float4 PSMain(PSInput input) : SV_TARGET {
     }
 
     void SelectSampleCount() {
-        const UINT wanted=quality==0?1u:(quality==1?2u:4u);
+        const UINT wanted=quality==0?1u:(quality==1?2u:(quality==2?4u:8u));
         sampleCount=1;
         for(UINT candidate=wanted;candidate>=2;candidate/=2) {
             UINT colorLevels=0,depthLevels=0;
@@ -571,8 +564,7 @@ float4 PSMain(PSInput input) : SV_TARGET {
         const UINT limit=std::min(count,MAX_UNITS);
         for(UINT i=0;i<limit;++i) {
             if(!units[i].alive)continue;
-            if(units[i].kind==3) BuildSupplyTruck(models,units[i],quality);
-            else BuildPerson(models,units[i],quality,time);
+            BuildSphereUnit(models,units[i],quality,time);
         }
         if(models.vertices.empty())return;
         dynamicVertexCount=static_cast<UINT>(std::min(models.vertices.size(),static_cast<std::size_t>(MAX_DYNAMIC_VERTICES)));
@@ -596,26 +588,56 @@ float4 PSMain(PSInput input) : SV_TARGET {
     ComPtr<ID3D11RasterizerState> rasterizer;
     ComPtr<ID3D11DepthStencilState> depthState;
     ComPtr<ID3D11BlendState> alphaBlend;
-    static constexpr UINT MAX_DYNAMIC_VERTICES=MAX_UNITS*2048;
+    static constexpr UINT MAX_DYNAMIC_VERTICES=MAX_UNITS*1024;
     UINT staticVertexCount=0,dynamicVertexCount=0;
     UINT sampleCount=1,renderWidth=0,renderHeight=0;
     int quality=1;
     float aspect=16.0f/9.0f;
+    XMFLOAT3 cameraPosition{0.0f,19.0f,-29.0f};
+    float cameraYaw=0.0f,cameraPitch=-0.54f;
     D3D11_VIEWPORT viewport{};
 };
 
 using UpdateFn=void(__cdecl*)(float);
 using GetUnitsFn=std::size_t(__cdecl*)(UnitView*,std::size_t);
 using RoundStateFn=int(__cdecl*)();
+using SpawnFn=int(__cdecl*)(std::uint32_t,std::uint32_t);
 HMODULE rustModule{};
 UpdateFn rustUpdate{};
 GetUnitsFn rustGetUnits{};
 RoundStateFn rustRoundState{};
+SpawnFn rustSpawn{};
 UnitView unitBuffer[MAX_UNITS]{};
 Renderer* renderer=nullptr;
 LONG_PTR savedStyle{};
 RECT savedRect{};
 bool borderless=false;
+bool antonFontLoaded=false;
+
+void LoadAntonFont() {
+    wchar_t exePath[MAX_PATH]{};
+    const DWORD n=GetModuleFileNameW(nullptr,exePath,MAX_PATH);
+    if(!n||n>=MAX_PATH)return;
+    std::wstring fontPath(exePath);
+    const auto slash=fontPath.find_last_of(L"\\/");
+    if(slash!=std::wstring::npos)fontPath.resize(slash+1);
+    fontPath+=L"Anton-Regular.ttf";
+    antonFontLoaded=AddFontResourceExW(fontPath.c_str(),FR_PRIVATE,nullptr)>0;
+}
+
+void UnloadAntonFont() {
+    if(!antonFontLoaded)return;
+    wchar_t exePath[MAX_PATH]{};
+    const DWORD n=GetModuleFileNameW(nullptr,exePath,MAX_PATH);
+    if(n&&n<MAX_PATH) {
+        std::wstring fontPath(exePath);
+        const auto slash=fontPath.find_last_of(L"\\/");
+        if(slash!=std::wstring::npos)fontPath.resize(slash+1);
+        fontPath+=L"Anton-Regular.ttf";
+        RemoveFontResourceExW(fontPath.c_str(),FR_PRIVATE,nullptr);
+    }
+    antonFontLoaded=false;
+}
 
 void LoadSimulation() {
     wchar_t path[MAX_PATH]{};
@@ -630,7 +652,8 @@ void LoadSimulation() {
     rustUpdate=reinterpret_cast<UpdateFn>(GetProcAddress(rustModule,"conflict_update"));
     rustGetUnits=reinterpret_cast<GetUnitsFn>(GetProcAddress(rustModule,"conflict_get_units"));
     rustRoundState=reinterpret_cast<RoundStateFn>(GetProcAddress(rustModule,"conflict_round_state"));
-    if(!rustUpdate||!rustGetUnits||!rustRoundState) {
+    rustSpawn=reinterpret_cast<SpawnFn>(GetProcAddress(rustModule,"conflict_spawn"));
+    if(!rustUpdate||!rustGetUnits||!rustRoundState||!rustSpawn) {
         FreeLibrary(rustModule);rustModule=nullptr;
         rustUpdate=nullptr;rustGetUnits=nullptr;rustRoundState=nullptr;
     }
@@ -655,6 +678,134 @@ void ToggleBorderless(HWND hwnd) {
     }
 }
 
+
+enum class ScreenMode { ChooseTeam, Game, Options, Graphics };
+ScreenMode screenMode=ScreenMode::ChooseTeam;
+int selectedTeam=0;
+int selectedUnitKind=0;
+int frameLimit=60;
+bool cameraDragging=false;
+POINT lastMouse{};
+
+void DrawTextGdi(HDC dc,int x,int y,const wchar_t* value,int height,COLORREF color,bool heading=false) {
+    HFONT font=CreateFontW(-height,0,0,0,heading?FW_BOLD:FW_NORMAL,FALSE,FALSE,FALSE,
+        DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,
+        DEFAULT_PITCH|FF_DONTCARE,heading?L"Anton":L"Segoe UI");
+    HGDIOBJ old=SelectObject(dc,font);
+    SetBkMode(dc,TRANSPARENT);SetTextColor(dc,color);
+    RECT r{x,y,1800,y+height+12};
+    DrawTextW(dc,value,-1,&r,DT_LEFT|DT_SINGLELINE|DT_VCENTER);
+    SelectObject(dc,old);DeleteObject(font);
+}
+
+void DrawPanel(HDC dc,int x,int y,int w,int h) {
+    HBRUSH brush=CreateSolidBrush(RGB(248,248,246));
+    HPEN pen=CreatePen(PS_SOLID,2,RGB(35,38,42));
+    auto oldBrush=SelectObject(dc,brush);auto oldPen=SelectObject(dc,pen);
+    RoundRect(dc,x,y,x+w,y+h,18,18);
+    SelectObject(dc,oldBrush);SelectObject(dc,oldPen);DeleteObject(brush);DeleteObject(pen);
+}
+
+void DrawButton(HDC dc,int x,int y,int w,int h,const wchar_t* label,COLORREF fill,COLORREF ink=RGB(248,248,248)) {
+    HBRUSH brush=CreateSolidBrush(fill);HPEN pen=CreatePen(PS_SOLID,1,RGB(40,42,45));
+    auto ob=SelectObject(dc,brush);auto op=SelectObject(dc,pen);
+    RoundRect(dc,x,y,x+w,y+h,10,10);
+    SelectObject(dc,ob);SelectObject(dc,op);DeleteObject(brush);DeleteObject(pen);
+    DrawTextGdi(dc,x+12,y+4,label,23,ink,true);
+}
+
+void DrawOverlay(HWND hwnd) {
+    HDC dc=GetDC(hwnd);if(!dc)return;
+    RECT client{};GetClientRect(hwnd,&client);
+    const int width=client.right,height=client.bottom;
+    if(screenMode==ScreenMode::Game) {
+        const int y=height-94,x=24,w=172,gap=8;
+        DrawPanel(dc,x-10,y-8,w*4+gap*3+20,82);
+        DrawTextGdi(dc,x,y-4,L"UNIDADES",17,RGB(35,38,42),true);
+        const wchar_t* names[]={L"ESPADACHIN",L"MEDICO",L"CATAPULTA",L"MILITAR MODERNO"};
+        for(int i=0;i<4;++i) {
+            const COLORREF fill=i==selectedUnitKind?RGB(38,43,51):RGB(91,98,106);
+            DrawButton(dc,x+i*(w+gap),y+19,w,42,names[i],fill);
+        }
+        DrawTextGdi(dc,width-320,20,selectedTeam==0?L"EQUIPO AZUL":L"EQUIPO ROJO",18,
+            selectedTeam==0?RGB(35,90,190):RGB(190,45,40),true);
+    } else if(screenMode==ScreenMode::ChooseTeam) {
+        DrawPanel(dc, width/2-280,height/2-190,560,380);
+        DrawTextGdi(dc,width/2-225,height/2-150,L"ELIGE TU EQUIPO",42,RGB(24,27,31),true);
+        DrawButton(dc,width/2-220,height/2-25,205,72,L"AZUL",RGB(30,85,190));
+        DrawButton(dc,width/2+15,height/2-25,205,72,L"ROJO",RGB(185,45,40));
+        DrawTextGdi(dc,width/2-205,height/2+75,L"Pulsa ESC para abrir Opciones",18,RGB(60,64,68));
+    } else if(screenMode==ScreenMode::Options) {
+        DrawPanel(dc,40,35,550,590);
+        DrawTextGdi(dc,78,62,L"OPCIONES",42,RGB(24,27,31),true);
+        DrawButton(dc,78,135,470,58,L"GRAFICOS",RGB(40,45,52));
+        DrawTextGdi(dc,80,220,L"BLOQUEO DE FOTOGRAMAS",19,RGB(40,44,48),true);
+        wchar_t cap[80]{};
+        if(frameLimit==0)wcscpy_s(cap,L"0  |  SIN LIMITE");
+        else swprintf_s(cap,L"%d FPS",frameLimit);
+        DrawTextGdi(dc,80,247,cap,18,RGB(40,44,48));
+        HPEN line=CreatePen(PS_SOLID,7,RGB(90,96,103));auto old=SelectObject(dc,line);
+        MoveToEx(dc,90,290,nullptr);LineTo(dc,510,290);SelectObject(dc,old);DeleteObject(line);
+        const int knob=90+(420*frameLimit/240);
+        HBRUSH k=CreateSolidBrush(RGB(35,90,190));auto ok=SelectObject(dc,k);
+        Ellipse(dc,knob-10,280,knob+10,300);SelectObject(dc,ok);DeleteObject(k);
+        DrawTextGdi(dc,80,315,L"NVIDIA APP",20,RGB(40,44,48),true);
+        DrawTextGdi(dc,80,345,L"Direct3D 11 · Overlay Alt+Z · Requiere NVIDIA App",15,RGB(75,78,82));
+        DrawButton(dc,78,405,470,52,L"VOLVER AL JUEGO",RGB(40,45,52));
+        DrawButton(dc,78,475,470,52,L"ELEGIR EQUIPO",RGB(80,87,95));
+        DrawTextGdi(dc,80,550,L"ESC: volver",15,RGB(80,84,88));
+    } else if(screenMode==ScreenMode::Graphics) {
+        DrawPanel(dc,40,35,550,500);
+        DrawTextGdi(dc,78,62,L"GRAFICOS",42,RGB(24,27,31),true);
+        const wchar_t* names[]={L"BAJO",L"MEDIO",L"ALTO",L"ULTRA"};
+        for(int i=0;i<4;++i) {
+            DrawButton(dc,78,135+i*70,470,52,names[i],renderer&&renderer->Quality()==i?RGB(35,90,190):RGB(55,60,67));
+        }
+        DrawButton(dc,78,430,470,52,L"VOLVER A OPCIONES",RGB(40,45,52));
+    }
+    ReleaseDC(hwnd,dc);
+}
+
+void HandleUiClick(HWND hwnd,int x,int y) {
+    RECT client{};GetClientRect(hwnd,&client);const int width=client.right,height=client.bottom;
+    if(screenMode==ScreenMode::ChooseTeam) {
+        if(y>=height/2-25&&y<=height/2+47) {
+            if(x>=width/2-220&&x<=width/2-15){selectedTeam=0;screenMode=ScreenMode::Game;}
+            else if(x>=width/2+15&&x<=width/2+220){selectedTeam=1;screenMode=ScreenMode::Game;}
+        }
+    } else if(screenMode==ScreenMode::Game) {
+        const int base=24,w=172,gap=8,top=height-75;
+        if(y>=top&&y<=top+42) {
+            for(int i=0;i<4;++i) {
+                const int left=base+i*(w+gap);
+                if(x>=left&&x<=left+w) {
+                    selectedUnitKind=i;
+                    if(rustSpawn)rustSpawn(static_cast<std::uint32_t>(selectedTeam),static_cast<std::uint32_t>(selectedUnitKind));
+                    break;
+                }
+            }
+        }
+    } else if(screenMode==ScreenMode::Options) {
+        if(x>=78&&x<=548) {
+            if(y>=135&&y<=193)screenMode=ScreenMode::Graphics;
+            else if(y>=275&&y<=305) {
+                const int value=std::clamp((x-90)*240/420,0,240);
+                frameLimit=value==0?0:std::clamp(((value+5)/10)*10,10,240);
+            } else if(y>=405&&y<=457)screenMode=ScreenMode::Game;
+            else if(y>=475&&y<=527)screenMode=ScreenMode::ChooseTeam;
+        }
+    } else if(screenMode==ScreenMode::Graphics) {
+        if(x>=78&&x<=548) {
+            if(y>=135&&y<=187&&renderer)renderer->SetQuality(0);
+            else if(y>=205&&y<=257&&renderer)renderer->SetQuality(1);
+            else if(y>=275&&y<=327&&renderer)renderer->SetQuality(2);
+            else if(y>=345&&y<=397&&renderer)renderer->SetQuality(3);
+            else if(y>=430&&y<=482)screenMode=ScreenMode::Options;
+        }
+    }
+    InvalidateRect(hwnd,nullptr,FALSE);
+}
+
 LRESULT CALLBACK WindowProc(HWND hwnd,UINT message,WPARAM wParam,LPARAM lParam) {
     switch(message) {
     case WM_SIZE:
@@ -663,24 +814,45 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT message,WPARAM wParam,LPARAM lParam) 
     case WM_ERASEBKGND:
         return 1;
     case WM_PAINT: {
-        PAINTSTRUCT ps{};BeginPaint(hwnd,&ps);EndPaint(hwnd,&ps);return 0;
+        PAINTSTRUCT ps{};BeginPaint(hwnd,&ps);EndPaint(hwnd,&ps);DrawOverlay(hwnd);return 0;
     }
     case WM_KEYDOWN:
         if(wParam==VK_F11)ToggleBorderless(hwnd);
-        else if(wParam==VK_ESCAPE&&borderless)ToggleBorderless(hwnd);
-        else if(wParam==VK_F1&&renderer) {
-            if(renderer->SetQuality(0))SetWindowTextW(hwnd,L"CONFLICT | GRAFICOS: BAJOS (F1/F2/F3)");
-        } else if(wParam==VK_F2&&renderer) {
-            if(renderer->SetQuality(1))SetWindowTextW(hwnd,L"CONFLICT | GRAFICOS: MEDIOS (F1/F2/F3)");
-        } else if(wParam==VK_F3&&renderer) {
-            if(renderer->SetQuality(2))SetWindowTextW(hwnd,L"CONFLICT | GRAFICOS: ALTOS (F1/F2/F3)");
+        else if(wParam==VK_ESCAPE) {
+            if(screenMode==ScreenMode::Game)screenMode=ScreenMode::Options;
+            else if(screenMode==ScreenMode::Graphics)screenMode=ScreenMode::Options;
+            else if(screenMode==ScreenMode::Options)screenMode=ScreenMode::Game;
+            else screenMode=ScreenMode::Options;
+            InvalidateRect(hwnd,nullptr,FALSE);
+        } else if(wParam==VK_F1&&renderer)renderer->SetQuality(0);
+        else if(wParam==VK_F2&&renderer)renderer->SetQuality(1);
+        else if(wParam==VK_F3&&renderer)renderer->SetQuality(2);
+        else if(wParam==VK_F4&&renderer)renderer->SetQuality(3);
+        return 0;
+    case WM_LBUTTONDOWN:
+        HandleUiClick(hwnd,GET_X_LPARAM(lParam),GET_Y_LPARAM(lParam));
+        return 0;
+    case WM_RBUTTONDOWN:
+        cameraDragging=true;lastMouse={GET_X_LPARAM(lParam),GET_Y_LPARAM(lParam)};
+        SetCapture(hwnd);return 0;
+    case WM_RBUTTONUP:
+        cameraDragging=false;ReleaseCapture();return 0;
+    case WM_MOUSEMOVE:
+        if(cameraDragging&&renderer) {
+            POINT current{GET_X_LPARAM(lParam),GET_Y_LPARAM(lParam)};
+            renderer->RotateCamera(static_cast<float>(current.x-lastMouse.x),static_cast<float>(current.y-lastMouse.y));
+            lastMouse=current;
         }
+        return 0;
+    case WM_MOUSEWHEEL:
+        if(renderer)renderer->ZoomCamera(-static_cast<float>(GET_WHEEL_DELTA_WPARAM(wParam))/120.0f*2.0f);
         return 0;
     case WM_GETMINMAXINFO: {
         auto* info=reinterpret_cast<MINMAXINFO*>(lParam);
         info->ptMinTrackSize.x=960;info->ptMinTrackSize.y=640;return 0;
     }
     case WM_DESTROY:
+        UnloadAntonFont();
         if(rustModule){FreeLibrary(rustModule);rustModule=nullptr;}
         PostQuitMessage(0);return 0;
     default:
@@ -691,13 +863,14 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT message,WPARAM wParam,LPARAM lParam) 
 
 int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR,int show) {
     SetProcessDPIAware();
+    LoadAntonFont();
     WNDCLASSEXW wc{sizeof(WNDCLASSEXW)};
     wc.style=CS_HREDRAW|CS_VREDRAW;wc.lpfnWndProc=WindowProc;wc.hInstance=instance;
     wc.hCursor=LoadCursorW(nullptr,IDC_ARROW);wc.hbrBackground=nullptr;wc.lpszClassName=WINDOW_CLASS;
     if(!RegisterClassExW(&wc))return 1;
 
     RECT bounds{0,0,1440,900};AdjustWindowRect(&bounds,WS_OVERLAPPEDWINDOW,FALSE);
-    HWND hwnd=CreateWindowExW(0,WINDOW_CLASS,L"CONFLICT | GRAFICOS: MEDIOS (F1/F2/F3)",WS_OVERLAPPEDWINDOW,
+    HWND hwnd=CreateWindowExW(0,WINDOW_CLASS,L"CONFLICT 0.7.0 | ESC: OPCIONES | WASD + MOUSE: CAMARA",WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT,CW_USEDEFAULT,bounds.right-bounds.left,bounds.bottom-bounds.top,
         nullptr,nullptr,instance,nullptr);
     if(!hwnd)return 1;
@@ -727,16 +900,29 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR,int show) {
         }
         if(!running)break;
 
-        const auto now=std::chrono::steady_clock::now();
+        const auto frameStart=std::chrono::steady_clock::now();
+        const auto now=frameStart;
         float dt=std::chrono::duration<float>(now-previous).count();
         previous=now;
         dt=std::clamp(dt,0.0f,0.05f);
 
-        rustUpdate(dt);
+        if(screenMode==ScreenMode::Game) {
+            const float forward=(GetAsyncKeyState('W')&0x8000?1.0f:0.0f)-(GetAsyncKeyState('S')&0x8000?1.0f:0.0f);
+            const float right=(GetAsyncKeyState('D')&0x8000?1.0f:0.0f)-(GetAsyncKeyState('A')&0x8000?1.0f:0.0f);
+            const float vertical=(GetAsyncKeyState('E')&0x8000?1.0f:0.0f)-(GetAsyncKeyState('Q')&0x8000?1.0f:0.0f);
+            graphics.MoveCamera(forward,right,vertical,dt);
+            rustUpdate(dt);
+        }
         const std::size_t count=rustGetUnits(unitBuffer,MAX_UNITS);
         const float elapsed=std::chrono::duration<float>(now.time_since_epoch()).count();
         graphics.Render(unitBuffer,static_cast<UINT>(std::min(count,static_cast<std::size_t>(MAX_UNITS))),elapsed);
-        Sleep(1);
+        DrawOverlay(hwnd);
+        if(frameLimit>0) {
+            const auto target=std::chrono::milliseconds(1000/frameLimit);
+            const auto deadline=frameStart+target;
+            const auto current=std::chrono::steady_clock::now();
+            if(current<deadline)std::this_thread::sleep_until(deadline);
+        }
     }
     renderer=nullptr;
     return static_cast<int>(msg.wParam);

@@ -1,7 +1,7 @@
-name: Build Conflict 0.6.0 3D for Windows
+name: Build Conflict 0.7.0 3D for Windows
 on:
   push:
-    branches: [main, master, feature/graphics-units-0.6.0]
+    branches: [main, master, feature/0.7.0-spheres-menu-camera]
   workflow_dispatch:
 permissions:
   contents: write
@@ -11,6 +11,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Download Anton font and OFL license
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path assets | Out-Null
+          Invoke-WebRequest -Uri "https://raw.githubusercontent.com/google/fonts/main/ofl/anton/Anton-Regular.ttf" -OutFile "assets/Anton-Regular.ttf"
+          Invoke-WebRequest -Uri "https://raw.githubusercontent.com/google/fonts/main/ofl/anton/OFL.txt" -OutFile "assets/Anton-OFL.txt"
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Test real-time simulation
@@ -26,6 +32,7 @@ jobs:
           $dll = "build/Release/conflict_core.dll"
           if (!(Test-Path $exe)) { throw "Conflict.exe is missing." }
           if (!(Test-Path $dll)) { throw "conflict_core.dll is missing." }
+          if (!(Test-Path "assets/Anton-Regular.ttf")) { throw "Anton font is missing." }
           foreach ($path in @($exe, $dll)) {
             $bytes = [System.IO.File]::ReadAllBytes($path)
             if ($bytes.Length -lt 1024) { throw "$path is unexpectedly small." }
@@ -39,15 +46,17 @@ jobs:
           Copy-Item build/Release/Conflict.exe package/
           Copy-Item build/Release/conflict_core.dll package/
           Copy-Item README.md package/
-          Compress-Archive -Path package/* -DestinationPath Conflict-0.6.0-Windows.zip -Force
+          Copy-Item assets/Anton-Regular.ttf package/
+          Copy-Item assets/Anton-OFL.txt package/
+          Compress-Archive -Path package/* -DestinationPath Conflict-0.7.0-Windows.zip -Force
       - name: Upload build
         uses: actions/upload-artifact@v4
         with:
-          name: Conflict-0.6.0-Windows
+          name: Conflict-0.7.0-Windows
           path: |
             build/Release/Conflict.exe
             build/Release/conflict_core.dll
-            Conflict-0.5.0-Windows.zip
+            Conflict-0.7.0-Windows.zip
           if-no-files-found: error
       - name: Publish tagged release
         if: startsWith(github.ref, 'refs/tags/v')
@@ -56,4 +65,4 @@ jobs:
           files: |
             build/Release/Conflict.exe
             build/Release/conflict_core.dll
-            Conflict-0.5.0-Windows.zip
+            Conflict-0.7.0-Windows.zip
