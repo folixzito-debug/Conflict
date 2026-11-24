@@ -1,6 +1,7 @@
 #define UNICODE
 #define _UNICODE
 #include <windows.h>
+#include <windowsx.h>
 #include <string>
 #include <vector>
 #include <algorithm>
@@ -30,7 +31,6 @@ COLORREF panel2 = RGB(31, 34, 38);
 COLORREF gold = RGB(190, 151, 83);
 COLORREF pale = RGB(224, 218, 202);
 COLORREF muted = RGB(139, 140, 137);
-COLORREF red = RGB(139, 55, 48);
 
 void Fill(HDC dc, RECT r, COLORREF c) {
     HBRUSH b = CreateSolidBrush(c); FillRect(dc, &r, b); DeleteObject(b);
@@ -56,7 +56,6 @@ RECT ButtonRect(int i) { return RECT{70, 270+i*78, 550, 330+i*78}; }
 void DrawBackground(HDC dc,int w,int h) {
     Fill(dc,RECT{0,0,w,h},bg);
     for(int i=0;i<9;i++) Line(dc,0,95+i*72,w,95+i*72,RGB(19,21,24));
-    // Abstract crossed-blade emblem
     HPEN p=CreatePen(PS_SOLID,5,RGB(65,57,45)); HPEN old=(HPEN)SelectObject(dc,p);
     MoveToEx(dc,w-350,135,nullptr); LineTo(dc,w-115,365);
     MoveToEx(dc,w-115,135,nullptr); LineTo(dc,w-350,365);
