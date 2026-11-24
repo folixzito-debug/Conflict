@@ -283,7 +283,7 @@ void BuildSphereUnit(MeshBuilder& mesh,const UnitView& unit,int quality,float ti
         mesh.Sphere(x+0.12f,ground+0.81f,z-0.39f,0.055f,0.055f,0.055f,bright,6,8);
     } else { // Swordsman: a clearly visible, stylised fantasy sword accessory.
         mesh.BoxYaw(x+0.40f,ground+0.55f,z+0.03f,0.085f,0.54f,0.09f,yaw,steel);
-        mesh.BoxYaw(x+0.40f,ground+0.27f,z+0.03f,0.12f,0.19f,0.12f,yaw,wood);
+        mesh.BoxYaw(x+0.40f,ground+0.27f,z+0.03f,0.12f,0.19f,0.12f,yaw,XMFLOAT4{0.39f,0.23f,0.12f,1.0f});
         mesh.BoxYaw(x+0.40f,ground+0.47f,z+0.03f,0.31f,0.065f,0.13f,yaw,XMFLOAT4{0.82f,0.68f,0.32f,1.0f});
         mesh.BoxYaw(x+0.40f,ground+0.83f,z+0.03f,0.13f,0.08f,0.13f,yaw,steel);
     }
