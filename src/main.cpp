@@ -1,285 +1,233 @@
 #include <windows.h>
 #include <windowsx.h>
-#include <string>
+#include <d3d11.h>
+#include <dxgi.h>
+#include <d2d1.h>
+#include <dwrite.h>
+#include <wrl/client.h>
+#include <array>
 #include <algorithm>
-#include <cmath>
-#include <cwchar>
+#include <string>
+#include <vector>
 
+using Microsoft::WRL::ComPtr;
 namespace {
-enum class Page { Menu, Campaign, QuickFight, Arsenal, Eras, Settings };
-Page page = Page::Menu;
-int selected = 0, hover = -1;
-bool keys[256]{};
-int clientW=1100, clientH=780;
-const int MENU_COUNT=5;
-struct MenuItem { const wchar_t* label; const wchar_t* detail; Page target; };
-const MenuItem menuItems[MENU_COUNT]={
- {L"CAMPAÑA",L"Avanza por las eras de la historia",Page::Campaign},
- {L"COMBATE RÁPIDO",L"Entra directamente a la arena",Page::QuickFight},
- {L"ARSENAL",L"Descubre armas de cada época",Page::Arsenal},
- {L"ÉPOCAS",L"Del año 0 hasta la era actual",Page::Eras},
- {L"AJUSTES",L"Configura tu experiencia",Page::Settings}
-};
-COLORREF bg=RGB(13,15,18), panel=RGB(23,26,30), gold=RGB(190,151,83);
-COLORREF pale=RGB(224,218,202), muted=RGB(139,140,137);
-struct Fighter { float x,y; int hp; int facing; bool blocking; float attack; float cooldown; float hurt; };
-Fighter player{}, enemy{};
-bool gameOver=false, playerWon=false;
-int roundNumber=1;
+constexpr wchar_t CLASS_NAME[]=L"ConflictModernWindow";
+constexpr float SIDEBAR=222.0f;
+constexpr int REGION_COUNT=6;
+enum class Page{Map,Army,Report,Settings};
+enum class Action{None,Map,Army,Report,Settings,Recruit,NextTurn,SelectRegion};
+struct Hit{D2D1_RECT_F rect{};Action action{Action::None};int value{};};
+struct Region{const wchar_t*name;const wchar_t*faction;int troops;int owner;};
+const std::array<Region,REGION_COUNT> regions{{
+ {L"NORTHREACH",L"AZURE UNION",245,0},{L"WESTHOLD",L"EMBER STATE",180,1},
+ {L"CENTRALIS",L"AZURE UNION",320,0},{L"EASTVALE",L"EMBER STATE",155,1},
+ {L"SOUTHBAY",L"VERDANT PACT",210,2},{L"ISLES",L"VERDANT PACT",95,2}
+}};
+const std::array<D2D1_COLOR_F,3> faction{{
+ D2D1::ColorF(.22f,.66f,.93f,1),D2D1::ColorF(.93f,.39f,.31f,1),D2D1::ColorF(.32f,.76f,.56f,1)
+}};
+const D2D1_COLOR_F BG=D2D1::ColorF(.047f,.059f,.075f,1);
+const D2D1_COLOR_F PANEL=D2D1::ColorF(.075f,.094f,.118f,1);
+const D2D1_COLOR_F CARD=D2D1::ColorF(.090f,.114f,.141f,1);
+const D2D1_COLOR_F BORDER=D2D1::ColorF(.17f,.21f,.25f,1);
+const D2D1_COLOR_F WHITE=D2D1::ColorF(.91f,.94f,.97f,1);
+const D2D1_COLOR_F MUTED=D2D1::ColorF(.48f,.55f,.62f,1);
+const D2D1_COLOR_F ACCENT=D2D1::ColorF(.31f,.70f,.98f,1);
+const D2D1_COLOR_F MAPBG=D2D1::ColorF(.065f,.10f,.12f,1);
+const D2D1_COLOR_F LAND=D2D1::ColorF(.12f,.17f,.19f,1);
 
-using RustDamageFn = int (__cdecl*)(int, int);
-using RustCanHitFn = int (__cdecl*)(float, float);
-HMODULE rustModule=nullptr;
-RustDamageFn rustDamage=nullptr;
-RustCanHitFn rustCanHit=nullptr;
-bool RustReady(){ return rustDamage!=nullptr && rustCanHit!=nullptr; }
-void LoadRustCore(){
- wchar_t exePath[MAX_PATH]{};
- DWORD n=GetModuleFileNameW(nullptr,exePath,MAX_PATH);
- if(!n || n>=MAX_PATH) return;
- std::wstring dllPath(exePath);
- size_t slash=dllPath.find_last_of(L"\\/");
- if(slash!=std::wstring::npos) dllPath.resize(slash+1);
- dllPath+=L"conflict_core.dll";
- rustModule=LoadLibraryW(dllPath.c_str());
- if(!rustModule) return;
- rustDamage=reinterpret_cast<RustDamageFn>(GetProcAddress(rustModule,"conflict_damage"));
- rustCanHit=reinterpret_cast<RustCanHitFn>(GetProcAddress(rustModule,"conflict_can_hit"));
- if(!RustReady()){
-   FreeLibrary(rustModule); rustModule=nullptr; rustDamage=nullptr; rustCanHit=nullptr;
+ComPtr<ID3D11Device> device;ComPtr<ID3D11DeviceContext> context;ComPtr<IDXGISwapChain> swapChain;
+ComPtr<ID2D1Factory> d2dFactory;ComPtr<ID2D1RenderTarget> target;ComPtr<ID2D1SolidColorBrush> brush;
+ComPtr<IDWriteFactory> writeFactory;ComPtr<IDWriteTextFormat> smallFont,bodyFont,boldFont,titleFont,heroFont;
+using ResetFn=void(__cdecl*)();using CountFn=int(__cdecl*)();using ValueFn=int(__cdecl*)(int);
+using RecruitFn=int(__cdecl*)(int,int);using NextFn=int(__cdecl*)();using TransferFn=int(__cdecl*)(int,int,int);
+HMODULE rustDll{};ResetFn rustReset{};CountFn rustCount{};ValueFn rustTroops{},rustOwner{},rustTotal{},rustDay{};
+RecruitFn rustRecruit{};NextFn rustNext{};TransferFn rustTransfer{};bool rustReady=false;
+Page page=Page::Map;int selected=2,clientW=1440,clientH=900,fallbackDay=1;bool borderless=false;
+LONG_PTR oldStyle{};RECT oldRect{};std::vector<Hit> hits;std::wstring toast;int toastFrames=0;
+
+int Troops(int i){return rustReady?std::max(0,rustTroops(i)):((i>=0&&i<REGION_COUNT)?regions[i].troops:0);}
+int Owner(int i){return rustReady?std::clamp(rustOwner(i),0,2):((i>=0&&i<REGION_COUNT)?regions[i].owner:0);}
+int Total(){if(rustReady)return std::max(0,rustTotal(0));int n=0;for(int i=0;i<REGION_COUNT;++i)n+=Troops(i);return n;}
+int Day(){return rustReady?std::max(1,rustDay(0)):fallbackDay;}
+void Notify(const std::wstring&s){toast=s;toastFrames=240;}
+
+void LoadRust(){
+ wchar_t path[MAX_PATH]{};DWORD n=GetModuleFileNameW(nullptr,path,MAX_PATH);if(!n||n>=MAX_PATH)return;
+ std::wstring dll(path);auto slash=dll.find_last_of(L"\\/");if(slash!=std::wstring::npos)dll.resize(slash+1);dll+=L"conflict_core.dll";
+ rustDll=LoadLibraryW(dll.c_str());if(!rustDll)return;
+ rustReset=reinterpret_cast<ResetFn>(GetProcAddress(rustDll,"conflict_reset"));
+ rustCount=reinterpret_cast<CountFn>(GetProcAddress(rustDll,"conflict_region_count"));
+ rustTroops=reinterpret_cast<ValueFn>(GetProcAddress(rustDll,"conflict_region_troops"));
+ rustOwner=reinterpret_cast<ValueFn>(GetProcAddress(rustDll,"conflict_region_owner"));
+ rustTotal=reinterpret_cast<ValueFn>(GetProcAddress(rustDll,"conflict_total_troops"));
+ rustDay=reinterpret_cast<ValueFn>(GetProcAddress(rustDll,"conflict_current_day"));
+ rustRecruit=reinterpret_cast<RecruitFn>(GetProcAddress(rustDll,"conflict_recruit"));
+ rustNext=reinterpret_cast<NextFn>(GetProcAddress(rustDll,"conflict_next_turn"));
+ rustTransfer=reinterpret_cast<TransferFn>(GetProcAddress(rustDll,"conflict_transfer"));
+ rustReady=rustReset&&rustCount&&rustTroops&&rustOwner&&rustTotal&&rustDay&&rustRecruit&&rustNext&&rustTransfer&&rustCount()==REGION_COUNT;
+ if(rustReady)rustReset();else{FreeLibrary(rustDll);rustDll=nullptr;}
+}
+HRESULT MakeFormat(float size,DWRITE_FONT_WEIGHT weight,DWRITE_TEXT_ALIGNMENT align,IDWriteTextFormat**out){
+ HRESULT h=writeFactory->CreateTextFormat(L"Segoe UI",nullptr,weight,DWRITE_FONT_STYLE_NORMAL,DWRITE_FONT_STRETCH_NORMAL,size,L"es-ES",out);
+ if(SUCCEEDED(h)){(*out)->SetTextAlignment(align);(*out)->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);(*out)->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);}return h;
+}
+HRESULT MakeTarget(){
+ ComPtr<IDXGISurface> surface;HRESULT h=swapChain->GetBuffer(0,IID_PPV_ARGS(&surface));if(FAILED(h))return h;
+ auto props=D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_DEFAULT,D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,D2D1_ALPHA_MODE_IGNORE),96,96);
+ h=d2dFactory->CreateDxgiSurfaceRenderTarget(surface.Get(),props,&target);if(FAILED(h))return h;
+ return target->CreateSolidColorBrush(WHITE,&brush);
+}
+HRESULT InitGraphics(HWND hwnd){
+ DXGI_SWAP_CHAIN_DESC sd{};sd.BufferDesc.Format=DXGI_FORMAT_B8G8R8A8_UNORM;sd.SampleDesc.Count=1;sd.BufferUsage=DXGI_USAGE_RENDER_TARGET_OUTPUT;
+ sd.BufferCount=2;sd.OutputWindow=hwnd;sd.Windowed=TRUE;sd.SwapEffect=DXGI_SWAP_EFFECT_DISCARD;
+ const D3D_FEATURE_LEVEL levels[]={D3D_FEATURE_LEVEL_11_0,D3D_FEATURE_LEVEL_10_1,D3D_FEATURE_LEVEL_10_0};D3D_FEATURE_LEVEL obtained{};
+ HRESULT h=D3D11CreateDeviceAndSwapChain(nullptr,D3D_DRIVER_TYPE_HARDWARE,nullptr,D3D11_CREATE_DEVICE_BGRA_SUPPORT,levels,3,D3D11_SDK_VERSION,&sd,&swapChain,&device,&obtained,&context);
+ if(FAILED(h))return h;
+ h=D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED,&d2dFactory);if(FAILED(h))return h;
+ h=DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED,__uuidof(IDWriteFactory),reinterpret_cast<IUnknown**>(writeFactory.GetAddressOf()));if(FAILED(h))return h;
+ if(FAILED(MakeFormat(11,DWRITE_FONT_WEIGHT_MEDIUM,DWRITE_TEXT_ALIGNMENT_LEADING,&smallFont)))return E_FAIL;
+ if(FAILED(MakeFormat(14,DWRITE_FONT_WEIGHT_NORMAL,DWRITE_TEXT_ALIGNMENT_LEADING,&bodyFont)))return E_FAIL;
+ if(FAILED(MakeFormat(14,DWRITE_FONT_WEIGHT_SEMI_BOLD,DWRITE_TEXT_ALIGNMENT_LEADING,&boldFont)))return E_FAIL;
+ if(FAILED(MakeFormat(22,DWRITE_FONT_WEIGHT_SEMI_BOLD,DWRITE_TEXT_ALIGNMENT_LEADING,&titleFont)))return E_FAIL;
+ if(FAILED(MakeFormat(30,DWRITE_FONT_WEIGHT_BOLD,DWRITE_TEXT_ALIGNMENT_LEADING,&heroFont)))return E_FAIL;
+ return MakeTarget();
+}
+void Resize(UINT w,UINT h){if(!swapChain||!w||!h)return;target.Reset();brush.Reset();context->OMSetRenderTargets(0,nullptr,nullptr);if(SUCCEEDED(swapChain->ResizeBuffers(0,w,h,DXGI_FORMAT_UNKNOWN,0)))MakeTarget();}
+void Fill(const D2D1_RECT_F&r,D2D1_COLOR_F c){brush->SetColor(c);target->FillRectangle(r,brush.Get());}
+void Round(const D2D1_RECT_F&r,D2D1_COLOR_F c,float rad=10){brush->SetColor(c);target->FillRoundedRectangle(D2D1::RoundedRect(r,rad,rad),brush.Get());}
+void Outline(const D2D1_RECT_F&r,D2D1_COLOR_F c,float rad=10,float w=1){brush->SetColor(c);target->DrawRoundedRectangle(D2D1::RoundedRect(r,rad,rad),brush.Get(),w);}
+void Stroke(float x1,float y1,float x2,float y2,D2D1_COLOR_F c,float w=1){brush->SetColor(c);target->DrawLine(D2D1::Point2F(x1,y1),D2D1::Point2F(x2,y2),brush.Get(),w);}
+void Dot(float x,float y,float rad,D2D1_COLOR_F c){brush->SetColor(c);target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x,y),rad,rad),brush.Get());}
+void Label(float x,float y,float w,float h,const std::wstring&s,IDWriteTextFormat*f,D2D1_COLOR_F c=WHITE){if(s.empty()||!f)return;brush->SetColor(c);target->DrawText(s.c_str(),static_cast<UINT32>(s.size()),f,D2D1::RectF(x,y,x+w,y+h),brush.Get());}
+void Small(float x,float y,float w,const std::wstring&s,D2D1_COLOR_F c=MUTED){Label(x,y,w,22,s,smallFont.Get(),c);}
+void Body(float x,float y,float w,const std::wstring&s,D2D1_COLOR_F c=WHITE){Label(x,y,w,28,s,bodyFont.Get(),c);}
+void Bold(float x,float y,float w,const std::wstring&s,D2D1_COLOR_F c=WHITE){Label(x,y,w,28,s,boldFont.Get(),c);}
+void Polygon(const std::vector<D2D1_POINT_2F>&p,D2D1_COLOR_F fill,D2D1_COLOR_F edge,float width){
+ if(p.size()<3)return;ComPtr<ID2D1PathGeometry>g;ComPtr<ID2D1GeometrySink>s;if(FAILED(d2dFactory->CreatePathGeometry(&g))||FAILED(g->Open(&s)))return;
+ s->BeginFigure(p[0],D2D1_FIGURE_BEGIN_FILLED);s->AddLines(p.data()+1,static_cast<UINT32>(p.size()-1));s->EndFigure(D2D1_FIGURE_END_CLOSED);if(FAILED(s->Close()))return;
+ brush->SetColor(fill);target->FillGeometry(g.Get(),brush.Get());brush->SetColor(edge);target->DrawGeometry(g.Get(),brush.Get(),width);
+}
+void Button(const D2D1_RECT_F&r,const std::wstring&s,Action a,int v=0,bool primary=false){
+ hits.push_back({r,a,v});Round(r,primary?ACCENT:CARD,9);if(!primary)Outline(r,BORDER,9);
+ Label(r.left+8,r.top+1,r.right-r.left-16,r.bottom-r.top-2,s,boldFont.Get(),primary?BG:WHITE);
+}
+void Stat(float x,float y,float w,const std::wstring&head,const std::wstring&value,D2D1_COLOR_F color){
+ auto r=D2D1::RectF(x,y,x+w,y+88);Round(r,CARD,12);Outline(r,BORDER,12);Round(D2D1::RectF(x+16,y+17,x+20,y+70),color,2);
+ Small(x+32,y+12,w-45,head);Label(x+32,y+36,w-45,40,value,titleFont.Get());
+}
+D2D1_POINT_2F Center(int i,const D2D1_RECT_F&m){
+ const float p[6][2]={{.13f,.27f},{.28f,.69f},{.49f,.45f},{.70f,.25f},{.73f,.72f},{.91f,.49f}};
+ return D2D1::Point2F(m.left+(m.right-m.left)*p[i][0],m.top+(m.bottom-m.top)*p[i][1]);
+}
+void TroopDots(float x,float y,int n,D2D1_COLOR_F c){int visible=std::clamp(5+n/65,6,20);for(int i=0;i<visible;++i){int row=i/5,col=i%5;Dot(x+(col-2)*12.0f+(row%2)*4.0f,y+(row-1.5f)*12.0f,4.1f,c);}}
+
+void Sidebar(){
+ Fill(D2D1::RectF(0,0,SIDEBAR,static_cast<float>(clientH)),PANEL);Stroke(SIDEBAR,0,SIDEBAR,static_cast<float>(clientH),BORDER);
+ Round(D2D1::RectF(22,24,58,60),ACCENT,9);Label(22,24,36,36,L"C",titleFont.Get(),BG);Bold(70,24,130,L"CONFLICT");Small(70,48,130,L"STRATEGY SYSTEM");
+ Small(24,111,170,L"WORKSPACE");
+ const struct{const wchar_t*n;Page p;Action a;}nav[]={{L"Mapa global",Page::Map,Action::Map},{L"Ejército",Page::Army,Action::Army},{L"Informe",Page::Report,Action::Report},{L"Ajustes",Page::Settings,Action::Settings}};
+ for(int i=0;i<4;++i){float y=142+i*54.0f;auto r=D2D1::RectF(12,y,SIDEBAR-12,y+44);if(page==nav[i].p){Round(r,D2D1::ColorF(.12f,.22f,.30f,1),8);Round(D2D1::RectF(12,y+8,15,y+36),ACCENT,2);}Label(31,y+2,165,40,nav[i].n,boldFont.Get(),page==nav[i].p?WHITE:MUTED);hits.push_back({r,nav[i].a,0});}
+ Round(D2D1::RectF(16,clientH-126.0f,SIDEBAR-16,clientH-22.0f),CARD,10);Small(29,clientH-111.0f,150,L"SIMULATION CORE");
+ Dot(31,clientH-72.0f,4,rustReady?D2D1::ColorF(.28f,.82f,.52f,1):D2D1::ColorF(.95f,.64f,.24f,1));
+ Bold(44,clientH-86.0f,140,rustReady?L"RUST ONLINE":L"SAFE MODE");Small(29,clientH-54.0f,150,L"BUILD 0.4.0  /  2026");
+}
+void Header(){
+ Stroke(SIDEBAR,87,static_cast<float>(clientW),87,BORDER);
+ const wchar_t*h=L"MAPA GLOBAL";const wchar_t*s=L"Vista general del territorio y despliegue de unidades";
+ if(page==Page::Army){h=L"EJÉRCITO";s=L"Conteo y distribución de unidades por región";}
+ if(page==Page::Report){h=L"INFORME";s=L"Resumen del estado de la simulación";}
+ if(page==Page::Settings){h=L"AJUSTES";s=L"Renderizado, ventana y compatibilidad";}
+ Label(250,12,600,38,h,titleFont.Get());Small(250,50,660,s);Round(D2D1::RectF(clientW-230.0f,25,clientW-32.0f,61),CARD,8);
+ Label(clientW-222.0f,26,182,34,L"2026  /  TURNO "+std::to_wstring(Day()),boldFont.Get(),ACCENT);
+}
+void MapPage(){
+ float x=250,y=112,w=std::max(170.0f,(clientW-310.0f)/3.0f-14.0f);
+ Stat(x,y,w,L"TOTAL DE TROPAS",std::to_wstring(Total()),ACCENT);Stat(x+w+14,y,w,L"TERRITORIOS",L"06",faction[2]);Stat(x+2*(w+14),y,w,L"TURNO ACTUAL",std::to_wstring(Day()),D2D1::ColorF(.92f,.67f,.32f,1));
+ auto map=D2D1::RectF(250,222,clientW-328.0f,clientH-30.0f);Round(map,MAPBG,14);Outline(map,BORDER,14);Small(map.left+18,map.top+12,220,L"MAPA DE REGIONES");Small(map.right-205,map.top+12,190,L"6 ZONAS ACTIVAS");
+ const int links[7][2]={{0,2},{1,2},{2,3},{2,4},{3,5},{4,5},{0,1}};std::array<D2D1_POINT_2F,REGION_COUNT> centers{};
+ for(int i=0;i<REGION_COUNT;++i)centers[i]=Center(i,map);
+ for(auto&l:links)Stroke(centers[l[0]].x,centers[l[0]].y,centers[l[1]].x,centers[l[1]].y,D2D1::ColorF(.24f,.34f,.38f,.7f),2);
+ for(int i=0;i<REGION_COUNT;++i){
+  auto p=centers[i];auto col=faction[Owner(i)];float rx=76,ry=51;
+  std::vector<D2D1_POINT_2F>shape={D2D1::Point2F(p.x-rx*.90f,p.y-ry*.42f),D2D1::Point2F(p.x-rx*.48f,p.y-ry*.98f),D2D1::Point2F(p.x+rx*.25f,p.y-ry*.92f),D2D1::Point2F(p.x+rx*.91f,p.y-ry*.45f),D2D1::Point2F(p.x+rx*.76f,p.y+ry*.48f),D2D1::Point2F(p.x+rx*.17f,p.y+ry*.95f),D2D1::Point2F(p.x-rx*.70f,p.y+ry*.70f),D2D1::Point2F(p.x-rx*1.02f,p.y+ry*.05f)};
+  bool chosen=i==selected;auto land=chosen?D2D1::ColorF(col.r*.42f+.06f,col.g*.42f+.06f,col.b*.42f+.06f,1):LAND;
+  Polygon(shape,land,chosen?col:BORDER,chosen?3.0f:1.2f);TroopDots(p.x,p.y-6,Troops(i),col);
+  auto count=D2D1::RectF(p.x-43,p.y+26,p.x+43,p.y+54);Round(count,PANEL,8);Outline(count,chosen?col:BORDER,8,chosen?1.5f:1);
+  Label(count.left,count.top,86,28,std::to_wstring(Troops(i)),boldFont.Get());Label(p.x-80,p.y+57,160,22,regions[i].name,smallFont.Get(),chosen?WHITE:MUTED);
+  hits.push_back({D2D1::RectF(p.x-rx,p.y-ry,p.x+rx,p.y+ry+37),Action::SelectRegion,i});
  }
+ float px=clientW-310.0f;auto panel=D2D1::RectF(px,222,clientW-24.0f,clientH-30.0f);Round(panel,PANEL,14);Outline(panel,BORDER,14);
+ Small(px+20,244,230,L"TERRITORIO SELECCIONADO");Label(px+20,276,250,34,regions[selected].name,titleFont.Get());Dot(px+28,342,5,faction[Owner(selected)]);Small(px+43,331,220,regions[selected].faction);
+ Small(px+20,385,230,L"UNIDADES DESPLEGADAS");Label(px+20,408,240,52,std::to_wstring(Troops(selected)),heroFont.Get());
+ Small(px+20,467,235,L"Cada punto representa un grupo");Small(px+20,487,235,L"de unidades en el mapa.");
+ Button(D2D1::RectF(px+18,532,px+260,578),L"RECLUTAR  +50",Action::Recruit,0,true);Stroke(px+18,609,px+260,609,BORDER);
+ Small(px+20,628,230,L"GESTIÓN DE TURNO");Body(px+20,653,230,L"Refuerzos automáticos");
+ Button(D2D1::RectF(px+18,705,px+260,751),L"SIGUIENTE TURNO",Action::NextTurn);
+ Small(px+20,clientH-56,235,rustReady?L"Simulación ejecutada en Rust":L"Respaldo C++");
 }
-void ResetFight(bool nextRound=false){
- if(nextRound) ++roundNumber; else roundNumber=1;
- player={260.0f,0.0f,100,1,false,0.0f,0.0f,0.0f};
- enemy={760.0f,0.0f,100,-1,false,0.0f,0.4f,0.0f};
- gameOver=false; playerWon=false;
+void ArmyPage(){
+ float x=250,w=std::min(520.0f,(clientW-300.0f)/2);Label(250,112,520,34,L"FUERZAS POR TERRITORIO",titleFont.Get());Small(250,151,620,L"Unidades representadas visualmente como grupos circulares.");
+ for(int i=0;i<REGION_COUNT;++i){int col=i%2,row=i/2;float left=x+col*(w+18),top=200+row*150;auto r=D2D1::RectF(left,top,left+w,top+126);Round(r,CARD,12);Outline(r,BORDER,12);Dot(left+33,top+38,7,faction[Owner(i)]);Bold(left+54,top+18,w-70,regions[i].name);Small(left+54,top+52,w-70,regions[i].faction);Label(left+20,top+81,w-40,35,std::to_wstring(Troops(i))+L" UNIDADES",boldFont.Get(),ACCENT);}
+ Stat(x,clientH-110,w,L"TOTAL EN EL MAPA",std::to_wstring(Total()),ACCENT);
 }
-void StartFight(HWND hwnd){ page=Page::QuickFight; ResetFight(false); SetTimer(hwnd,1,16,nullptr); }
-void Fill(HDC d,RECT r,COLORREF c){HBRUSH b=CreateSolidBrush(c);FillRect(d,&r,b);DeleteObject(b);}
-void Text(HDC d,const wchar_t*s,int x,int y,int size,COLORREF c,bool bold=false,UINT align=DT_LEFT){
- HFONT f=CreateFontW(-size,0,0,0,bold?FW_BOLD:FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH|FF_DONTCARE,L"Segoe UI");
- HFONT old=(HFONT)SelectObject(d,f);SetBkMode(d,TRANSPARENT);SetTextColor(d,c);
- RECT r{x,y,clientW-25,y+size+18};DrawTextW(d,s,-1,&r,align|DT_SINGLELINE|DT_VCENTER);SelectObject(d,old);DeleteObject(f);
+void ReportPage(){
+ float x=250;Label(x,112,500,34,L"ESTADO DEL MUNDO",titleFont.Get());Small(x,151,600,L"Resumen de la partida actual.");
+ Stat(x,205,300,L"TOTAL DE UNIDADES",std::to_wstring(Total()),ACCENT);Stat(x+320,205,300,L"REGIONES",L"06",faction[2]);Stat(x+640,205,300,L"TURNO",std::to_wstring(Day()),D2D1::ColorF(.92f,.67f,.32f,1));
+ auto panel=D2D1::RectF(x,325,clientW-40.0f,570);Round(panel,CARD,12);Outline(panel,BORDER,12);Bold(x+24,345,600,L"DISTRIBUCIÓN REGIONAL");
+ for(int i=0;i<REGION_COUNT;++i){float top=390+i*27.0f;Small(x+24,top,155,regions[i].name,WHITE);Round(D2D1::RectF(x+190,top+5,x+610,top+17),PANEL,5);float ratio=std::clamp(Troops(i)/500.0f,0.0f,1.0f);Round(D2D1::RectF(x+190,top+5,x+190+420*ratio,top+17),faction[Owner(i)],5);Small(x+635,top,120,std::to_wstring(Troops(i)),WHITE);}
 }
-void Line(HDC d,int x1,int y1,int x2,int y2,COLORREF c,int width=1){HPEN p=CreatePen(PS_SOLID,width,c),o=(HPEN)SelectObject(d,p);MoveToEx(d,x1,y1,nullptr);LineTo(d,x2,y2);SelectObject(d,o);DeleteObject(p);}
-void Frame(HDC d,RECT r,COLORREF c){HPEN p=CreatePen(PS_SOLID,1,c); HGDIOBJ op=SelectObject(d,p),ob=SelectObject(d,GetStockObject(HOLLOW_BRUSH));Rectangle(d,r.left,r.top,r.right,r.bottom);SelectObject(d,op);SelectObject(d,ob);DeleteObject(p);}
-RECT MenuRect(int i){return RECT{70,270+i*78,550,330+i*78};}
-void DrawMenu(HDC d){
- Text(d,L"ESTRATEGIA  /  COMBATE  /  HISTORIA",70,38,12,muted,true);Line(d,70,66,clientW-70,66,RGB(55,49,40));
- Text(d,L"CONFLICT",70,105,62,pale,true);Text(d,L"AGES OF WAR",74,174,17,gold,true);Text(d,L"UNA HISTORIA ESCRITA EN ACERO",72,211,13,muted);
- for(int i=0;i<MENU_COUNT;i++){RECT r=MenuRect(i);bool a=i==selected||i==hover;Fill(d,r,a?RGB(48,39,30):panel);Frame(d,r,a?gold:RGB(49,51,53));if(a)Fill(d,{r.left,r.top,r.left+4,r.bottom},gold);Text(d,menuItems[i].label,r.left+22,r.top+7,19,a?pale:RGB(185,185,179),true);Text(d,menuItems[i].detail,r.left+22,r.top+32,11,muted);Text(d,i==selected?L">":L"",r.right-36,r.top+15,18,gold,true);}
- Text(d,L"↑  ↓  NAVEGAR       ENTER  CONFIRMAR       ESC  VOLVER",70,clientH-64,12,muted);
+void SettingsPage(){
+ float x=250;Label(x,112,620,34,L"RENDERIZADO Y COMPATIBILIDAD",titleFont.Get());Small(x,151,700,L"Configuración nativa de Windows.");
+ auto panel=D2D1::RectF(x,205,clientW-45.0f,700);Round(panel,CARD,12);Outline(panel,BORDER,12);
+ Bold(x+25,230,400,L"GRÁFICOS");Small(x+25,276,220,L"API DE RENDERIZADO");Bold(x+280,276,400,L"DIRECT3D 11 + DXGI",ACCENT);Stroke(x+25,318,clientW-75.0f,318,BORDER);
+ Small(x+25,340,220,L"MODO DE VENTANA");Bold(x+280,340,500,borderless?L"SIN BORDES":L"VENTANA REDIMENSIONABLE");Small(x+25,394,220,L"CAMBIAR MODO");
+ Button(D2D1::RectF(x+280,385,x+510,428),borderless?L"VOLVER A VENTANA":L"ACTIVAR SIN BORDES",Action::None);
+ Stroke(x+25,456,clientW-75.0f,456,BORDER);Bold(x+25,479,400,L"NVIDIA APP OVERLAY");
+ Body(x+25,522,880,L"El programa no bloquea superposiciones externas ni captura Alt+Z.");
+ Small(x+25,556,900,L"Compatibilidad prevista con Direct3D 11. Depende del controlador, NVIDIA App");
+ Small(x+25,578,900,L"y de las funciones admitidas por cada aplicación.");
+ Stroke(x+25,622,clientW-75.0f,622,BORDER);Bold(x+25,644,300,L"SIMULACIÓN");Small(x+280,644,500,rustReady?L"Rust cargado correctamente":L"Motor C++ de respaldo",rustReady?faction[2]:MUTED);
 }
-void DrawBar(HDC d,int x,int y,int w,int hp,const wchar_t*name,bool flip){
- Text(d,name,x,y-27,15,pale,true);Fill(d,{x,y,x+w,y+18},RGB(48,43,40));int fw=w*std::max(0,hp)/100;
- Fill(d,flip?RECT{x+w-fw,y,x+w,y+18}:RECT{x,y,x+fw,y+18},hp>30?RGB(91,139,83):RGB(174,76,61));Frame(d,{x,y,x+w,y+18},gold);
+void Draw(){
+ if(!target||!swapChain)return;hits.clear();target->BeginDraw();target->SetTransform(D2D1::Matrix3x2F::Identity());target->Clear(BG);
+ Sidebar();Header();if(page==Page::Map)MapPage();else if(page==Page::Army)ArmyPage();else if(page==Page::Report)ReportPage();else SettingsPage();
+ if(toastFrames>0&&!toast.empty()){float w=std::min(430.0f,clientW-260.0f),x=clientW-w-28.0f;auto r=D2D1::RectF(x,clientH-73.0f,x+w,clientH-28.0f);Round(r,CARD,9);Outline(r,BORDER,9);Label(x+15,r.top+2,w-30,40,toast,bodyFont.Get());--toastFrames;}
+ HRESULT h=target->EndDraw();if(h==D2DERR_RECREATE_TARGET){target.Reset();brush.Reset();MakeTarget();return;}swapChain->Present(1,0);
 }
-void EllipseShape(HDC d,RECT r,COLORREF fill,COLORREF outline){
- HBRUSH b=CreateSolidBrush(fill);HPEN p=CreatePen(PS_SOLID,1,outline);
- HGDIOBJ ob=SelectObject(d,b),op=SelectObject(d,p);Ellipse(d,r.left,r.top,r.right,r.bottom);
- SelectObject(d,ob);SelectObject(d,op);DeleteObject(b);DeleteObject(p);
-}
-void PolyShape(HDC d,const POINT*pts,int count,COLORREF fill,COLORREF outline){
- HBRUSH b=CreateSolidBrush(fill);HPEN p=CreatePen(PS_SOLID,1,outline);
- HGDIOBJ ob=SelectObject(d,b),op=SelectObject(d,p);Polygon(d,pts,count);
- SelectObject(d,ob);SelectObject(d,op);DeleteObject(b);DeleteObject(p);
-}
-void DrawFighter(HDC d,const Fighter&f,bool isPlayer,int ground){
- int x=(int)f.x, y=ground-7;
- COLORREF armor=isPlayer?RGB(46,78,107):RGB(112,49,43);
- COLORREF bright=isPlayer?RGB(105,144,174):RGB(174,103,79);
- COLORREF dark=isPlayer?RGB(25,45,63):RGB(66,31,29);
- COLORREF cloth=isPlayer?RGB(42,48,56):RGB(51,37,33);
- // Ground shadow and boots.
- EllipseShape(d,{x-38,ground-10,x+39,ground+7},RGB(27,24,21),RGB(27,24,21));
- Line(d,x-12,y-50,x-23,y-9,cloth,13);Line(d,x+12,y-50,x+22,y-9,cloth,13);
- Line(d,x-23,y-9,x-6,y-7,RGB(28,26,23),9);Line(d,x+22,y-9,x+38,y-7,RGB(28,26,23),9);
- // Greaves and knee plates.
- Fill(d,{x-19,y-49,x-6,y-16},RGB(91,88,78));Fill(d,{x+6,y-49,x+19,y-16},RGB(91,88,78));
- Line(d,x-18,y-34,x-6,y-34,gold,2);Line(d,x+6,y-34,x+18,y-34,gold,2);
- // Body silhouette and tunic.
- POINT torso[6]={{x-23,y-112},{x+23,y-112},{x+29,y-61},{x+18,y-47},{x-18,y-47},{x-29,y-61}};
- PolyShape(d,torso,6,armor,dark);Line(d,x-23,y-106,x+23,y-106,bright,2);
- Line(d,x,y-105,x,y-53,dark,2);
- Fill(d,{x-20,y-57,x+20,y-48},RGB(58,45,34));Line(d,x-19,y-55,x+19,y-55,gold,3);
- EllipseShape(d,{x-5,y-59,x+5,y-49},gold,RGB(94,67,39));
- // Shoulder plates, arms and gauntlets.
- EllipseShape(d,{x-34,y-111,x-12,y-88},bright,dark);
- EllipseShape(d,{x+12,y-111,x+34,y-88},bright,dark);
- Line(d,x+f.facing*20,y-98,x+f.facing*37,y-77,bright,11);
- Line(d,x+f.facing*37,y-77,x+f.facing*43,y-71,RGB(155,148,130),9);
- // Helmet, neck guard and visor.
- Fill(d,{x-9,y-120,x+9,y-111},RGB(126,111,85));
- EllipseShape(d,{x-21,y-151,x+21,y-113},RGB(117,119,116),RGB(45,49,50));
- Fill(d,{x-21,y-135,x+21,y-126},RGB(83,88,88));Line(d,x-19,y-132,x+19,y-132,gold,2);
- Fill(d,{x-13,y-145,x+13,y-140},RGB(28,32,34));
- Line(d,x-17,y-119,x+17,y-119,RGB(173,164,141),2);
- // Sword with a short slash arc while attacking.
- int sx=x+f.facing*41,sy=y-74;
- int reach=f.attack>0?83:56;
- int tipX=sx+f.facing*reach,tipY=sy-(f.attack>0?42:25);
- Line(d,sx,sy,tipX,tipY,RGB(42,43,43),7);
- Line(d,sx,sy,tipX,tipY,RGB(190,198,199),4);
- Line(d,sx,sy-2,tipX,tipY-2,RGB(235,231,215),1);
- Line(d,sx-f.facing*10,sy+8,sx+f.facing*10,sy-8,gold,5);
- if(f.blocking){
-   POINT shield[5]={{x+f.facing*28,y-131},{x+f.facing*59,y-119},{x+f.facing*62,y-74},{x+f.facing*43,y-58},{x+f.facing*27,y-82}};
-   PolyShape(d,shield,5,RGB(123,91,57),gold);
-   Line(d,x+f.facing*36,y-117,x+f.facing*53,y-77,RGB(205,178,126),2);
- }
- if(f.hurt>0){Frame(d,{x-39,y-155,x+39,y+4},RGB(242,204,140));}
-}
-void DrawBanner(HDC d,int x,int top,COLORREF cloth){
- Line(d,x,top,x,top+145,RGB(119,105,80),5);
- POINT flag[5]={{x+3,top+8},{x+68,top+17},{x+65,top+104},{x+35,top+124},{x+3,top+105}};
- PolyShape(d,flag,5,cloth,RGB(191,156,103));
- Line(d,x+16,top+26,x+53,top+92,RGB(221,194,143),3);
- Line(d,x+53,top+26,x+16,top+92,RGB(221,194,143),3);
-}
-void DrawTorch(HDC d,int x,int y){
- EllipseShape(d,{x-24,y-29,x+24,y+20},RGB(89,58,35),RGB(29,28,25));
- Fill(d,{x-5,y-53,x+5,y-5},RGB(105,69,39));
- EllipseShape(d,{x-13,y-63,x+13,y-32},RGB(221,115,42),RGB(221,115,42));
- EllipseShape(d,{x-7,y-56,x+7,y-36},RGB(246,190,83),RGB(246,190,83));
-}
-void DrawArena(HDC d){
- Fill(d,{0,0,clientW,clientH},RGB(17,20,24));
- // Dusky sky behind the fortress.
- Fill(d,{0,0,clientW,170},RGB(31,38,46));
- Fill(d,{0,170,clientW,315},RGB(43,44,44));
- Fill(d,{0,315,clientW,405},RGB(54,48,40));
- EllipseShape(d,{clientW/2-165,52,clientW/2+165,285},RGB(37,40,43),RGB(37,40,43));
- // Back wall and battlements.
- Fill(d,{0,235,clientW,411},RGB(68,64,56));
- for(int x=0;x<clientW;x+=96){
-   Fill(d,{x+5,214,x+76,241},RGB(83,77,66));
-   Fill(d,{x+16,198,x+32,218},RGB(83,77,66));
-   Fill(d,{x+49,198,x+65,218},RGB(83,77,66));
- }
- for(int row=0;row<4;row++){
-   int yy=252+row*37;
-   Line(d,0,yy,clientW,yy,RGB(48,48,45),2);
-   for(int x=(row%2)*48;x<clientW;x+=96)Line(d,x,yy-35,x,yy,RGB(49,48,45),2);
- }
- // Central gate, framed by stone blocks.
- Fill(d,{clientW/2-118,254,clientW/2+118,411},RGB(34,34,33));
- EllipseShape(d,{clientW/2-118,205,clientW/2+118,355},RGB(34,34,33),RGB(103,91,72));
- Fill(d,{clientW/2-105,295,clientW/2+105,411},RGB(27,29,30));
- for(int i=0;i<8;i++)Line(d,clientW/2-92+i*26,300,clientW/2-92+i*26,411,RGB(62,59,52),3);
- // Side towers and stone columns.
- for(int side=0;side<2;side++){
-   int x=side?clientW-112:28;
-   Fill(d,{x,165,x+84,411},RGB(91,82,68));Frame(d,{x,165,x+84,411},RGB(39,39,37));
-   for(int yy=185;yy<400;yy+=43)Line(d,x,yy,x+84,yy,RGB(54,52,47),2);
-   Fill(d,{x-10,155,x+94,177},RGB(111,97,76));
-   Fill(d,{x+19,207,x+64,275},RGB(34,34,32));
-   DrawTorch(d,x+42,331);
- }
- DrawBanner(d,clientW/2-310,184,RGB(105,45,39));
- DrawBanner(d,clientW/2+245,184,RGB(42,65,88));
- // Audience silhouettes behind the fighting area.
- for(int row=0;row<2;row++)for(int x=155;x<clientW-145;x+=34){
-   int y=349+row*22;
-   EllipseShape(d,{x-6,y-17,x+7,y-4},RGB(32+row*4,31+row*3,29),RGB(32,31,29));
-   Line(d,x,y-5,x,y+12,RGB(31,30,29),6);
- }
- Line(d,0,408,clientW,408,gold,3);
- // Stone arena floor with perspective seams and individual block joints.
- Fill(d,{0,411,clientW,clientH},RGB(73,64,51));
- for(int row=0;row<7;row++){
-   int yy=420+row*std::max(25,(clientH-420)/7);
-   Line(d,0,yy,clientW,yy,RGB(51,48,42),2);
-   int step=112-row*7;
-   for(int x=(row%2)*step;x<clientW;x+=step)Line(d,x,yy-step/2,x,yy+step/2,RGB(54,50,43),2);
- }
- for(int x=0;x<clientW;x+=160)Line(d,x,412,x-105,clientH,RGB(91,78,59),1);
- // Foreground edge and corner stones.
- Fill(d,{0,clientH-30,clientW,clientH},RGB(39,37,33));
- Line(d,0,clientH-30,clientW,clientH-30,RGB(130,107,72),2);
- // Combat HUD.
- Fill(d,{38,28,clientW-38,105},RGB(18,21,24));Frame(d,{38,28,clientW-38,105},RGB(91,78,59));
- DrawBar(d,65,64,365,player.hp,L"GUERRERO AZUL",false);
- DrawBar(d,clientW-430,64,365,enemy.hp,L"GUERRERO ROJO",true);
- Text(d,L"CONFLICT",clientW/2-68,34,16,pale,true,DT_CENTER);
- Text(d,RustReady()?L"RUST CORE  /  ONLINE":L"RUST CORE  /  FALLBACK",clientW/2-95,70,10,RustReady()?RGB(133,177,132):muted,true,DT_CENTER);
- wchar_t roundLabel[32]{};wsprintfW(roundLabel,L"RONDA  %02d",roundNumber);
- Text(d,roundLabel,clientW/2-55,119,13,gold,true,DT_CENTER);
- int ground=clientH-82;
- DrawFighter(d,player,true,ground);DrawFighter(d,enemy,false,ground);
- Line(d,0,ground,clientW,ground,RGB(153,126,83),2);
- Text(d,L"A / D o FLECHAS  MOVER     J  ATACAR     K  BLOQUEAR     R  REINICIAR     ESC  MENÚ",35,clientH-53,12,pale,true,DT_CENTER);
- if(gameOver){
-   Fill(d,{clientW/2-255,clientH/2-100,clientW/2+255,clientH/2+96},RGB(17,19,21));
-   Frame(d,{clientW/2-255,clientH/2-100,clientW/2+255,clientH/2+96},gold);
-   Text(d,playerWon?L"VICTORIA":L"DERROTA",clientW/2-155,clientH/2-69,36,playerWon?gold:pale,true,DT_CENTER);
-   Text(d,L"La arena tiene un vencedor",clientW/2-145,clientH/2-15,14,muted,false,DT_CENTER);
-   Text(d,L"Pulsa R para otra ronda o ESC para salir",clientW/2-205,clientH/2+45,14,pale,false,DT_CENTER);
- }
-}
-void DrawSubpage(HDC d){
- const wchar_t*head=L"";const wchar_t*l1=L"",*l2=L"",*l3=L"";
- switch(page){case Page::Campaign:head=L"CAMPAÑA";l1=L"Una travesía a través de las eras.";l2=L"Comienza en el año 0 y descubre cómo cambia el combate.";l3=L"PRÓXIMAMENTE — progresión histórica y desafíos.";break;
- case Page::Arsenal:head=L"ARSENAL";l1=L"PALOS / LANZAS / ESPADAS / ESCUDOS";l2=L"Cada arma tendrá alcance, velocidad y estilo propios.";l3=L"El arsenal crecerá junto con las épocas.";break;
- case Page::Eras:head=L"CRONOLOGÍA";l1=L"AÑO 0       ANTIGÜEDAD       EDAD MEDIA";l2=L"EDAD MODERNA       ERA INDUSTRIAL       ACTUALIDAD";l3=L"Las épocas avanzan por etapas.";break;
- case Page::Settings:head=L"AJUSTES";l1=L"RESOLUCIÓN — ventana adaptable";l2=L"CONTROLES — teclado y ratón";l3=L"Más opciones estarán disponibles en futuras versiones.";break;default:break;}
- Text(d,L"CONFLICT  /  MENÚ PRINCIPAL",70,38,12,muted,true);Line(d,70,66,clientW-70,66,RGB(55,49,40));Text(d,head,70,130,42,pale,true);Line(d,70,194,clientW-70,194,gold,2);Text(d,l1,76,245,18,pale);Text(d,l2,76,300,18,pale);Text(d,l3,76,355,18,gold,true);Text(d,L"VOLVER  [ESC]",70,clientH-110,16,pale,true);
-}
-void Paint(HWND hwnd){PAINTSTRUCT ps;HDC dc=BeginPaint(hwnd,&ps);RECT rc;GetClientRect(hwnd,&rc);clientW=rc.right;clientH=rc.bottom;HDC mem=CreateCompatibleDC(dc);HBITMAP bmp=CreateCompatibleBitmap(dc,clientW,clientH);HBITMAP old=(HBITMAP)SelectObject(mem,bmp);Fill(mem,{0,0,clientW,clientH},bg);if(page==Page::Menu)DrawMenu(mem);else if(page==Page::QuickFight)DrawArena(mem);else DrawSubpage(mem);BitBlt(dc,0,0,clientW,clientH,mem,0,0,SRCCOPY);SelectObject(mem,old);DeleteObject(bmp);DeleteDC(mem);EndPaint(hwnd,&ps);}
-void Hit(Fighter&target,Fighter&attacker){
- if(target.hp<=0||target.hurt>0)return;
- float dist=std::abs(target.x-attacker.x);
- bool inRange=rustCanHit?rustCanHit(dist,112.0f)!=0:dist<112.0f;
- if(inRange){
-   int damage=rustDamage?rustDamage(14,target.blocking?1:0):(target.blocking?4:14);
-   target.hp=std::max(0,target.hp-damage);target.hurt=0.18f;
- }
-}
-void Update(HWND hwnd){
- if(page!=Page::QuickFight||gameOver)return;
- const float dt=0.016f;
- player.blocking=keys['K'];
- if(keys['A']||keys[VK_LEFT]){player.x-=245*dt;player.facing=-1;}
- if(keys['D']||keys[VK_RIGHT]){player.x+=245*dt;player.facing=1;}
- player.x=std::clamp(player.x,45.0f,(float)clientW-45);
- enemy.facing=enemy.x>player.x?-1:1;
- if(player.attack>0)player.attack=std::max(0.0f,player.attack-dt);
- if(enemy.attack>0)enemy.attack=std::max(0.0f,enemy.attack-dt);
- if(player.cooldown>0)player.cooldown-=dt;
- if(enemy.cooldown>0)enemy.cooldown-=dt;
- if(player.hurt>0)player.hurt-=dt;
- if(enemy.hurt>0)enemy.hurt-=dt;
- if(keys['J']&&player.cooldown<=0){player.attack=0.22f;player.cooldown=0.48f;Hit(enemy,player);}
- // Simple rival AI: approach, then strike when close.
- float dist=std::abs(enemy.x-player.x);
- enemy.blocking=dist<125 && player.attack>0.05f;
- if(dist>100)enemy.x+=(enemy.x>player.x?-1:1)*125*dt;
- else if(enemy.cooldown<=0){enemy.attack=0.2f;enemy.cooldown=0.95f;Hit(player,enemy);}
- enemy.x=std::clamp(enemy.x,45.0f,(float)clientW-45);
- if(player.hp<=0||enemy.hp<=0){gameOver=true;playerWon=enemy.hp<=0;}
+void ToggleBorderless(HWND hwnd){
+ if(!borderless){oldStyle=GetWindowLongPtrW(hwnd,GWL_STYLE);GetWindowRect(hwnd,&oldRect);MONITORINFO m{sizeof(m)};GetMonitorInfoW(MonitorFromWindow(hwnd,MONITOR_DEFAULTTONEAREST),&m);SetWindowLongPtrW(hwnd,GWL_STYLE,WS_POPUP|WS_VISIBLE);SetWindowPos(hwnd,HWND_TOP,m.rcMonitor.left,m.rcMonitor.top,m.rcMonitor.right-m.rcMonitor.left,m.rcMonitor.bottom-m.rcMonitor.top,SWP_FRAMECHANGED|SWP_NOOWNERZORDER);borderless=true;}
+ else{SetWindowLongPtrW(hwnd,GWL_STYLE,oldStyle);SetWindowPos(hwnd,nullptr,oldRect.left,oldRect.top,oldRect.right-oldRect.left,oldRect.bottom-oldRect.top,SWP_FRAMECHANGED|SWP_NOZORDER|SWP_NOOWNERZORDER);borderless=false;}
  InvalidateRect(hwnd,nullptr,FALSE);
 }
-void Activate(HWND hwnd){if(page!=Page::Menu){page=Page::Menu;InvalidateRect(hwnd,nullptr,FALSE);return;}Page target=menuItems[selected].target;if(target==Page::QuickFight){StartFight(hwnd);}else{page=target;InvalidateRect(hwnd,nullptr,FALSE);}}
+void Act(HWND hwnd,const Hit&h){
+ switch(h.action){
+ case Action::Map:page=Page::Map;break;case Action::Army:page=Page::Army;break;case Action::Report:page=Page::Report;break;case Action::Settings:page=Page::Settings;break;
+ case Action::SelectRegion:selected=std::clamp(h.value,0,REGION_COUNT-1);break;
+ case Action::Recruit:if(rustReady&&rustRecruit(selected,50)==1)Notify(L"Se añadieron 50 unidades al territorio.");else Notify(L"No se pudo reclutar en este territorio.");break;
+ case Action::NextTurn:if(rustReady)Notify(L"Turno "+std::to_wstring(rustNext())+L": refuerzos actualizados.");break;
+ case Action::None:if(page==Page::Settings&&h.rect.left>500)ToggleBorderless(hwnd);break;
+ }
+ InvalidateRect(hwnd,nullptr,FALSE);
+}
 LRESULT CALLBACK WndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
  switch(msg){
- case WM_PAINT:Paint(hwnd);return 0;
+ case WM_SIZE:clientW=LOWORD(lp);clientH=HIWORD(lp);Resize(static_cast<UINT>(clientW),static_cast<UINT>(clientH));InvalidateRect(hwnd,nullptr,FALSE);return 0;
+ case WM_PAINT:{PAINTSTRUCT ps{};BeginPaint(hwnd,&ps);Draw();EndPaint(hwnd,&ps);return 0;}
  case WM_ERASEBKGND:return 1;
- case WM_TIMER:if(wp==1)Update(hwnd);return 0;
- case WM_KEYDOWN:
-   if(wp<256)keys[wp]=true;
-   if(wp==VK_ESCAPE){page=Page::Menu;selected=0;KillTimer(hwnd,1);InvalidateRect(hwnd,nullptr,FALSE);}
-   else if(page==Page::Menu&&(wp==VK_DOWN||wp==VK_UP)){selected=(selected+(wp==VK_DOWN?1:MENU_COUNT-1))%MENU_COUNT;InvalidateRect(hwnd,nullptr,FALSE);}
-   else if(page==Page::Menu&&wp==VK_RETURN)Activate(hwnd);
-   else if(page==Page::QuickFight&&wp=='R'){ResetFight(true);InvalidateRect(hwnd,nullptr,FALSE);}
-   return 0;
- case WM_KEYUP:if(wp<256)keys[wp]=false;return 0;
- case WM_MOUSEMOVE:if(page==Page::Menu){POINT p{GET_X_LPARAM(lp),GET_Y_LPARAM(lp)};int n=-1;for(int i=0;i<MENU_COUNT;i++){RECT r=MenuRect(i);if(PtInRect(&r,p))n=i;}if(n!=hover){hover=n;InvalidateRect(hwnd,nullptr,FALSE);}}return 0;
- case WM_LBUTTONUP:if(page==Page::Menu){POINT p{GET_X_LPARAM(lp),GET_Y_LPARAM(lp)};for(int i=0;i<MENU_COUNT;i++){RECT r=MenuRect(i);if(PtInRect(&r,p)){selected=i;Activate(hwnd);break;}}}else if(page!=Page::QuickFight){page=Page::Menu;selected=0;InvalidateRect(hwnd,nullptr,FALSE);}return 0;
- case WM_DESTROY:KillTimer(hwnd,1);if(rustModule){FreeLibrary(rustModule);rustModule=nullptr;}PostQuitMessage(0);return 0;
- }return DefWindowProcW(hwnd,msg,wp,lp);
+ case WM_LBUTTONUP:{float x=static_cast<float>(GET_X_LPARAM(lp)),y=static_cast<float>(GET_Y_LPARAM(lp));for(auto it=hits.rbegin();it!=hits.rend();++it)if(x>=it->rect.left&&x<=it->rect.right&&y>=it->rect.top&&y<=it->rect.bottom){Act(hwnd,*it);break;}return 0;}
+ case WM_KEYDOWN:if(wp==VK_F11)ToggleBorderless(hwnd);else if(wp==VK_ESCAPE&&borderless)ToggleBorderless(hwnd);return 0;
+ case WM_GETMINMAXINFO:{auto*m=reinterpret_cast<MINMAXINFO*>(lp);m->ptMinTrackSize.x=1040;m->ptMinTrackSize.y=700;return 0;}
+ case WM_DESTROY:if(rustDll){FreeLibrary(rustDll);rustDll=nullptr;}PostQuitMessage(0);return 0;
+ default:return DefWindowProcW(hwnd,msg,wp,lp);
+ }
 }
 }
 int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR,int show){
- SetProcessDPIAware();WNDCLASSW wc{};wc.lpfnWndProc=WndProc;wc.hInstance=instance;wc.lpszClassName=L"ConflictWindow";wc.hCursor=LoadCursor(nullptr,IDC_ARROW);wc.hbrBackground=(HBRUSH)(COLOR_WINDOW+1);RegisterClassW(&wc);
- RECT r{0,0,1100,780};AdjustWindowRect(&r,WS_OVERLAPPEDWINDOW,FALSE);HWND hwnd=CreateWindowExW(0,wc.lpszClassName,L"CONFLICT — Ages of War",WS_OVERLAPPEDWINDOW|WS_VISIBLE,CW_USEDEFAULT,CW_USEDEFAULT,r.right-r.left,r.bottom-r.top,nullptr,nullptr,instance,nullptr);if(!hwnd)return 1;LoadRustCore();ShowWindow(hwnd,show);UpdateWindow(hwnd);MSG msg{};while(GetMessageW(&msg,nullptr,0,0)>0){TranslateMessage(&msg);DispatchMessageW(&msg);}return (int)msg.wParam;
+ SetProcessDPIAware();WNDCLASSEXW wc{sizeof(WNDCLASSEXW)};wc.style=CS_HREDRAW|CS_VREDRAW;wc.lpfnWndProc=WndProc;wc.hInstance=instance;wc.hCursor=LoadCursorW(nullptr,IDC_ARROW);wc.lpszClassName=CLASS_NAME;
+ if(!RegisterClassExW(&wc))return 1;RECT r{0,0,1440,900};AdjustWindowRect(&r,WS_OVERLAPPEDWINDOW,FALSE);
+ HWND hwnd=CreateWindowExW(0,CLASS_NAME,L"CONFLICT — Strategy System",WS_OVERLAPPEDWINDOW,CW_USEDEFAULT,CW_USEDEFAULT,r.right-r.left,r.bottom-r.top,nullptr,nullptr,instance,nullptr);
+ if(!hwnd)return 1;if(FAILED(InitGraphics(hwnd))){MessageBoxW(hwnd,L"No se pudo iniciar Direct3D 11. Actualiza los controladores gráficos.",L"CONFLICT — Error gráfico",MB_OK|MB_ICONERROR);DestroyWindow(hwnd);return 1;}
+ LoadRust();ShowWindow(hwnd,show);UpdateWindow(hwnd);MSG msg{};while(GetMessageW(&msg,nullptr,0,0)>0){TranslateMessage(&msg);DispatchMessageW(&msg);}return static_cast<int>(msg.wParam);
 }
