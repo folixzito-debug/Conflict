@@ -5,10 +5,11 @@ const UNITS_PER_TEAM: usize = 20;
 const TOTAL_UNITS: usize = UNITS_PER_TEAM * 2;
 const RESET_DELAY: f32 = 2.6;
 
-const LINE: u32 = 0;
+const SWORDSMAN: u32 = 0;
 const MEDIC: u32 = 1;
-const ENGINEER: u32 = 2;
-const SUPPLY_TRUCK: u32 = 3;
+const CATAPULT: u32 = 2;
+const MODERN: u32 = 3;
+const MAX_WORLD_UNITS: usize = 64;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -41,8 +42,8 @@ impl Unit {
     fn new(x: f32, z: f32, team: u32, kind: u32, seed: usize) -> Self {
         let (max_health, attack_timer) = match kind {
             MEDIC => (82.0, 0.0),
-            ENGINEER => (118.0, 0.0),
-            SUPPLY_TRUCK => (260.0, 0.0),
+            CATAPULT => (155.0, 0.0),
+            MODERN => (125.0, 0.0),
             _ => (105.0, 0.2 + (seed % 4) as f32 * 0.08),
         };
         Self {
@@ -73,10 +74,10 @@ impl World {
     fn new() -> Self {
         // A mixed formation: line units, medics, engineers and unarmed supply trucks.
         const KINDS: [u32; 20] = [
-            LINE, MEDIC, LINE, ENGINEER, LINE,
-            LINE, SUPPLY_TRUCK, LINE, MEDIC, LINE,
-            LINE, ENGINEER, LINE, MEDIC, LINE,
-            LINE, SUPPLY_TRUCK, LINE, ENGINEER, LINE,
+            SWORDSMAN, MEDIC, SWORDSMAN, CATAPULT, MODERN,
+            SWORDSMAN, SWORDSMAN, MEDIC, SWORDSMAN, MODERN,
+            SWORDSMAN, CATAPULT, SWORDSMAN, MEDIC, SWORDSMAN,
+            MODERN, SWORDSMAN, CATAPULT, SWORDSMAN, SWORDSMAN,
         ];
         let mut units = Vec::with_capacity(TOTAL_UNITS);
         for team in 0..2u32 {
@@ -98,8 +99,19 @@ impl World {
         self.units.iter().filter(|u| u.alive && u.team == team).count()
     }
 
-    fn line_count(&self, team: u32) -> usize {
-        self.units.iter().filter(|u| u.alive && u.team == team && u.kind == LINE).count()
+    fn combat_count(&self, team: u32) -> usize {
+        self.units.iter().filter(|u| u.alive && u.team == team && u.kind != MEDIC).count()
+    }
+
+    fn spawn(&mut self, team: u32, kind: u32) -> bool {
+        if team > 1 || kind > MODERN || self.units.len() >= MAX_WORLD_UNITS { return false; }
+        let ordinal = self.units.iter().filter(|u| u.team == team).count();
+        let row = ordinal / 5;
+        let col = ordinal % 5;
+        let x = if team == 0 { -12.0 + row as f32 * 0.45 } else { 12.0 - row as f32 * 0.45 };
+        let z = -4.0 + col as f32 * 1.6;
+        self.units.push(Unit::new(x, z, team, kind, ordinal));
+        true
     }
 
     fn update(&mut self, dt: f32) {
@@ -118,7 +130,7 @@ impl World {
             let z = self.units[i].z;
 
             // Support roles never attack: they move toward damaged allies and restore them.
-            if kind == MEDIC || kind == ENGINEER {
+            if kind == MEDIC {
                 let mut target: Option<(usize, f32, f32, f32)> = None;
                 for (j, ally) in self.units.iter().enumerate() {
                     if j == i || !ally.alive || ally.team != team || ally.health >= ally.max_health - 0.5 { continue; }
@@ -130,17 +142,15 @@ impl World {
                 if let Some((target_index, dist_sq, dx, dz)) = target {
                     let distance = dist_sq.sqrt();
                     if distance > 0.0001 { self.units[i].heading = dx.atan2(dz); }
-                    let speed = if kind == MEDIC { 1.55 } else { 1.10 };
                     if distance > 1.15 {
-                        let step = (speed * dt).min(distance - 1.15);
+                        let step = (1.55 * dt).min(distance - 1.15);
                         if distance > 0.0001 {
                             self.units[i].x += dx / distance * step;
                             self.units[i].z += dz / distance * step;
                         }
                     } else {
-                        let healing = if kind == MEDIC { 18.0 } else { 10.0 } * dt;
                         self.units[target_index].health =
-                            (self.units[target_index].health + healing).min(self.units[target_index].max_health);
+                            (self.units[target_index].health + 18.0 * dt).min(self.units[target_index].max_health);
                         self.units[i].support_pulse = 0.18;
                         self.units[target_index].support_pulse = 0.18;
                     }
@@ -148,27 +158,7 @@ impl World {
                 continue;
             }
 
-            if kind == SUPPLY_TRUCK {
-                self.units[i].support_timer -= dt;
-                if self.units[i].support_timer <= 0.0 {
-                    self.units[i].support_timer = 0.9;
-                    let mut supplied = false;
-                    for ally in &mut self.units {
-                        if !ally.alive || ally.team != team || ally.health >= ally.max_health - 0.5 { continue; }
-                        let dx = ally.x - x;
-                        let dz = ally.z - z;
-                        if dx * dx + dz * dz <= 3.8 * 3.8 {
-                            ally.health = (ally.health + 5.0).min(ally.max_health);
-                            ally.support_pulse = 0.18;
-                            supplied = true;
-                        }
-                    }
-                    if supplied { self.units[i].support_pulse = 0.18; }
-                }
-                continue;
-            }
-
-            // Line units retain the original abstract engagement simulation.
+            // Sphere classes use a simplified abstract game engagement.
             let mut target: Option<(usize, f32, f32, f32)> = None;
             for (j, opponent) in self.units.iter().enumerate() {
                 if !opponent.alive || opponent.team == team { continue; }
@@ -197,8 +187,8 @@ impl World {
             }
         }
 
-        let blue = self.line_count(0);
-        let red = self.line_count(1);
+        let blue = self.combat_count(0);
+        let red = self.combat_count(1);
         if blue == 0 || red == 0 {
             self.winner = if blue == 0 && red == 0 { 3 } else if blue == 0 { 2 } else { 1 };
             self.reset_timer = RESET_DELAY;
@@ -243,6 +233,11 @@ pub extern "C" fn conflict_get_units(output: *mut UnitView, capacity: usize) -> 
 pub extern "C" fn conflict_round_state() -> i32 { with_world(|world| world.winner).unwrap_or(0) }
 
 #[no_mangle]
+pub extern "C" fn conflict_spawn(team: u32, kind: u32) -> i32 {
+    with_world(|world| i32::from(world.spawn(team, kind))).unwrap_or(0)
+}
+
+#[no_mangle]
 pub extern "C" fn conflict_alive_count(team: u32) -> u32 {
     with_world(|world| world.alive_count(team) as u32).unwrap_or(0)
 }
@@ -258,14 +253,14 @@ mod tests {
         assert_eq!(world.alive_count(0), 20);
         assert_eq!(world.alive_count(1), 20);
         assert_eq!(world.units.iter().filter(|u| u.team == 0 && u.kind == MEDIC).count(), 3);
-        assert_eq!(world.units.iter().filter(|u| u.team == 0 && u.kind == ENGINEER).count(), 3);
-        assert_eq!(world.units.iter().filter(|u| u.team == 0 && u.kind == SUPPLY_TRUCK).count(), 2);
+        assert_eq!(world.units.iter().filter(|u| u.team == 0 && u.kind == CATAPULT).count(), 3);
+        assert_eq!(world.units.iter().filter(|u| u.team == 0 && u.kind == MODERN).count(), 3);
     }
 
     #[test]
     fn line_units_advance_toward_the_opposing_side() {
         let mut world = World::new();
-        let index = world.units.iter().position(|u| u.kind == LINE && u.team == 0).unwrap();
+        let index = world.units.iter().position(|u| u.kind == SWORDSMAN && u.team == 0).unwrap();
         let before = world.units[index].x;
         world.update(0.05);
         assert!(world.units[index].x > before);
@@ -275,7 +270,7 @@ mod tests {
     fn support_units_heal_damaged_allies() {
         let mut world = World::new();
         let medic = world.units.iter().position(|u| u.kind == MEDIC && u.team == 0).unwrap();
-        let patient = world.units.iter().position(|u| u.kind == LINE && u.team == 0).unwrap();
+        let patient = world.units.iter().position(|u| u.kind == SWORDSMAN && u.team == 0).unwrap();
         world.units[medic].x = world.units[patient].x;
         world.units[medic].z = world.units[patient].z;
         world.units[patient].health -= 40.0;
@@ -288,7 +283,7 @@ mod tests {
     fn winning_team_resets_the_round() {
         let mut world = World::new();
         for unit in &mut world.units {
-            if unit.team == 1 && unit.kind == LINE { unit.alive = false; }
+            if unit.team == 1 && unit.kind != MEDIC { unit.alive = false; }
         }
         world.update(0.01);
         assert_eq!(world.winner, 1);
@@ -296,6 +291,15 @@ mod tests {
         assert_eq!(world.winner, 0);
         assert_eq!(world.alive_count(0), 20);
         assert_eq!(world.alive_count(1), 20);
+    }
+
+    #[test]
+    fn spawn_adds_selected_sphere_class_to_selected_team() {
+        let mut world = World::new();
+        assert!(world.spawn(0, CATAPULT));
+        assert_eq!(world.units.last().unwrap().team, 0);
+        assert_eq!(world.units.last().unwrap().kind, CATAPULT);
+        assert!(!world.spawn(3, MODERN));
     }
 
     #[test]
