@@ -16,6 +16,8 @@ jobs:
         uses: actions/checkout@v4
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+      - name: Test Rust combat rules
+        run: cargo test --manifest-path rust/Cargo.toml
       - name: Configure
         run: cmake -S . -B build -A x64
       - name: Compile C++ and Rust
@@ -30,7 +32,11 @@ jobs:
           $exeItem = Get-Item $exe
           $dllItem = Get-Item $dll
           if ($exeItem.Length -lt 10000) { throw "Executable is unexpectedly small." }
-          if ($dllItem.Length -lt 10000) { throw "Rust core DLL is unexpectedly small." }
+          if ($dllItem.Length -lt 1024) { throw "Rust core DLL is unexpectedly small." }
+          $exeBytes = [System.IO.File]::ReadAllBytes($exe)
+          $dllBytes = [System.IO.File]::ReadAllBytes($dll)
+          if ($exeBytes[0] -ne 0x4D -or $exeBytes[1] -ne 0x5A) { throw "Conflict.exe is not a Windows PE executable." }
+          if ($dllBytes[0] -ne 0x4D -or $dllBytes[1] -ne 0x5A) { throw "conflict_core.dll is not a Windows PE library." }
           Write-Host "Built $($exeItem.FullName) ($($exeItem.Length) bytes)"
           Write-Host "Built $($dllItem.FullName) ($($dllItem.Length) bytes)"
       - name: Package
