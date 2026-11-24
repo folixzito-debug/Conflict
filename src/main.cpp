@@ -5,6 +5,7 @@
 #include <string>
 #include <algorithm>
 #include <cmath>
+#include <cwchar>
 
 namespace {
 enum class Page { Menu, Campaign, QuickFight, Arsenal, Eras, Settings };
@@ -27,12 +28,36 @@ struct Fighter { float x,y; int hp; int facing; bool blocking; float attack; flo
 Fighter player{}, enemy{};
 bool gameOver=false, playerWon=false;
 int roundNumber=1;
-void ResetFight(){
+
+using RustDamageFn = int (__cdecl*)(int, int);
+using RustCanHitFn = int (__cdecl*)(float, float);
+HMODULE rustModule=nullptr;
+RustDamageFn rustDamage=nullptr;
+RustCanHitFn rustCanHit=nullptr;
+bool RustReady(){ return rustDamage!=nullptr && rustCanHit!=nullptr; }
+void LoadRustCore(){
+ wchar_t exePath[MAX_PATH]{};
+ DWORD n=GetModuleFileNameW(nullptr,exePath,MAX_PATH);
+ if(!n || n>=MAX_PATH) return;
+ std::wstring dllPath(exePath);
+ size_t slash=dllPath.find_last_of(L"\\/");
+ if(slash!=std::wstring::npos) dllPath.resize(slash+1);
+ dllPath+=L"conflict_core.dll";
+ rustModule=LoadLibraryW(dllPath.c_str());
+ if(!rustModule) return;
+ rustDamage=reinterpret_cast<RustDamageFn>(GetProcAddress(rustModule,"conflict_damage"));
+ rustCanHit=reinterpret_cast<RustCanHitFn>(GetProcAddress(rustModule,"conflict_can_hit"));
+ if(!RustReady()){
+   FreeLibrary(rustModule); rustModule=nullptr; rustDamage=nullptr; rustCanHit=nullptr;
+ }
+}
+void ResetFight(bool nextRound=false){
+ if(nextRound) ++roundNumber; else roundNumber=1;
  player={260.0f,0.0f,100,1,false,0.0f,0.0f,0.0f};
  enemy={760.0f,0.0f,100,-1,false,0.0f,0.4f,0.0f};
- gameOver=false; playerWon=false; roundNumber++;
+ gameOver=false; playerWon=false;
 }
-void StartFight(HWND hwnd){ page=Page::QuickFight; ResetFight(); SetTimer(hwnd,1,16,nullptr); }
+void StartFight(HWND hwnd){ page=Page::QuickFight; ResetFight(false); SetTimer(hwnd,1,16,nullptr); }
 void Fill(HDC d,RECT r,COLORREF c){HBRUSH b=CreateSolidBrush(c);FillRect(d,&r,b);DeleteObject(b);}
 void Text(HDC d,const wchar_t*s,int x,int y,int size,COLORREF c,bool bold=false,UINT align=DT_LEFT){
  HFONT f=CreateFontW(-size,0,0,0,bold?FW_BOLD:FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH|FF_DONTCARE,L"Segoe UI");
@@ -52,42 +77,147 @@ void DrawBar(HDC d,int x,int y,int w,int hp,const wchar_t*name,bool flip){
  Text(d,name,x,y-27,15,pale,true);Fill(d,{x,y,x+w,y+18},RGB(48,43,40));int fw=w*std::max(0,hp)/100;
  Fill(d,flip?RECT{x+w-fw,y,x+w,y+18}:RECT{x,y,x+fw,y+18},hp>30?RGB(91,139,83):RGB(174,76,61));Frame(d,{x,y,x+w,y+18},gold);
 }
+void EllipseShape(HDC d,RECT r,COLORREF fill,COLORREF outline){
+ HBRUSH b=CreateSolidBrush(fill);HPEN p=CreatePen(PS_SOLID,1,outline);
+ HGDIOBJ ob=SelectObject(d,b),op=SelectObject(d,p);Ellipse(d,r.left,r.top,r.right,r.bottom);
+ SelectObject(d,ob);SelectObject(d,op);DeleteObject(b);DeleteObject(p);
+}
+void PolyShape(HDC d,const POINT*pts,int count,COLORREF fill,COLORREF outline){
+ HBRUSH b=CreateSolidBrush(fill);HPEN p=CreatePen(PS_SOLID,1,outline);
+ HGDIOBJ ob=SelectObject(d,b),op=SelectObject(d,p);Polygon(d,pts,count);
+ SelectObject(d,ob);SelectObject(d,op);DeleteObject(b);DeleteObject(p);
+}
 void DrawFighter(HDC d,const Fighter&f,bool isPlayer,int ground){
- int x=(int)f.x, y=ground-12;COLORREF armor=isPlayer?RGB(69,105,139):RGB(142,75,61),edge=isPlayer?RGB(128,166,194):RGB(191,133,104);
- // shadow
- HBRUSH sh=CreateSolidBrush(RGB(24,23,21));RECT sr{x-35,ground-7,x+36,ground+3};FillRect(d,&sr,sh);DeleteObject(sh);
- // legs, torso, helmet
- Fill(d,{x-19,y-58,x-5,y-12},RGB(74,70,62));Fill(d,{x+5,y-58,x+19,y-12},RGB(74,70,62));
- Fill(d,{x-25,y-115,x+25,y-52},armor);Frame(d,{x-25,y-115,x+25,y-52},edge);
- Fill(d,{x-18,y-146,x+18,y-112},RGB(112,105,89));Frame(d,{x-18,y-146,x+18,y-112},gold);
- Fill(d,{x-20,y-135,x+20,y-127},RGB(35,35,34));
- // arm
- Line(d,x+(f.facing*16),y-101,x+(f.facing*38),y-79,edge,9);
- // sword; extends during attack
- int reach=(f.attack>0)?72:48;
- int sx=x+f.facing*38, sy=y-79;
- Line(d,sx,sy,sx+f.facing*reach,sy-20,RGB(185,190,192),4);
- Line(d,sx-f.facing*3,sy+7,sx+f.facing*8,sy-7,gold,5);
- if(f.blocking) {Line(d,x+f.facing*31,y-135,x+f.facing*65,y-45,gold,5);}
- if(f.hurt>0){Frame(d,{x-33,y-153,x+33,y+1},RGB(230,190,120));}
+ int x=(int)f.x, y=ground-7;
+ COLORREF armor=isPlayer?RGB(46,78,107):RGB(112,49,43);
+ COLORREF bright=isPlayer?RGB(105,144,174):RGB(174,103,79);
+ COLORREF dark=isPlayer?RGB(25,45,63):RGB(66,31,29);
+ COLORREF cloth=isPlayer?RGB(42,48,56):RGB(51,37,33);
+ // Ground shadow and boots.
+ EllipseShape(d,{x-38,ground-10,x+39,ground+7},RGB(27,24,21),RGB(27,24,21));
+ Line(d,x-12,y-50,x-23,y-9,cloth,13);Line(d,x+12,y-50,x+22,y-9,cloth,13);
+ Line(d,x-23,y-9,x-6,y-7,RGB(28,26,23),9);Line(d,x+22,y-9,x+38,y-7,RGB(28,26,23),9);
+ // Greaves and knee plates.
+ Fill(d,{x-19,y-49,x-6,y-16},RGB(91,88,78));Fill(d,{x+6,y-49,x+19,y-16},RGB(91,88,78));
+ Line(d,x-18,y-34,x-6,y-34,gold,2);Line(d,x+6,y-34,x+18,y-34,gold,2);
+ // Body silhouette and tunic.
+ POINT torso[6]={{x-23,y-112},{x+23,y-112},{x+29,y-61},{x+18,y-47},{x-18,y-47},{x-29,y-61}};
+ PolyShape(d,torso,6,armor,dark);Line(d,x-23,y-106,x+23,y-106,bright,2);
+ Line(d,x,y-105,x,y-53,dark,2);
+ Fill(d,{x-20,y-57,x+20,y-48},RGB(58,45,34));Line(d,x-19,y-55,x+19,y-55,gold,3);
+ EllipseShape(d,{x-5,y-59,x+5,y-49},gold,RGB(94,67,39));
+ // Shoulder plates, arms and gauntlets.
+ EllipseShape(d,{x-34,y-111,x-12,y-88},bright,dark);
+ EllipseShape(d,{x+12,y-111,x+34,y-88},bright,dark);
+ Line(d,x+f.facing*20,y-98,x+f.facing*37,y-77,bright,11);
+ Line(d,x+f.facing*37,y-77,x+f.facing*43,y-71,RGB(155,148,130),9);
+ // Helmet, neck guard and visor.
+ Fill(d,{x-9,y-120,x+9,y-111},RGB(126,111,85));
+ EllipseShape(d,{x-21,y-151,x+21,y-113},RGB(117,119,116),RGB(45,49,50));
+ Fill(d,{x-21,y-135,x+21,y-126},RGB(83,88,88));Line(d,x-19,y-132,x+19,y-132,gold,2);
+ Fill(d,{x-13,y-145,x+13,y-140},RGB(28,32,34));
+ Line(d,x-17,y-119,x+17,y-119,RGB(173,164,141),2);
+ // Sword with a short slash arc while attacking.
+ int sx=x+f.facing*41,sy=y-74;
+ int reach=f.attack>0?83:56;
+ int tipX=sx+f.facing*reach,tipY=sy-(f.attack>0?42:25);
+ Line(d,sx,sy,tipX,tipY,RGB(42,43,43),7);
+ Line(d,sx,sy,tipX,tipY,RGB(190,198,199),4);
+ Line(d,sx,sy-2,tipX,tipY-2,RGB(235,231,215),1);
+ Line(d,sx-f.facing*10,sy+8,sx+f.facing*10,sy-8,gold,5);
+ if(f.blocking){
+   POINT shield[5]={{x+f.facing*28,y-131},{x+f.facing*59,y-119},{x+f.facing*62,y-74},{x+f.facing*43,y-58},{x+f.facing*27,y-82}};
+   PolyShape(d,shield,5,RGB(123,91,57),gold);
+   Line(d,x+f.facing*36,y-117,x+f.facing*53,y-77,RGB(205,178,126),2);
+ }
+ if(f.hurt>0){Frame(d,{x-39,y-155,x+39,y+4},RGB(242,204,140));}
+}
+void DrawBanner(HDC d,int x,int top,COLORREF cloth){
+ Line(d,x,top,x,top+145,RGB(119,105,80),5);
+ POINT flag[5]={{x+3,top+8},{x+68,top+17},{x+65,top+104},{x+35,top+124},{x+3,top+105}};
+ PolyShape(d,flag,5,cloth,RGB(191,156,103));
+ Line(d,x+16,top+26,x+53,top+92,RGB(221,194,143),3);
+ Line(d,x+53,top+26,x+16,top+92,RGB(221,194,143),3);
+}
+void DrawTorch(HDC d,int x,int y){
+ EllipseShape(d,{x-24,y-29,x+24,y+20},RGB(89,58,35),RGB(29,28,25));
+ Fill(d,{x-5,y-53,x+5,y-5},RGB(105,69,39));
+ EllipseShape(d,{x-13,y-63,x+13,y-32},RGB(221,115,42),RGB(221,115,42));
+ EllipseShape(d,{x-7,y-56,x+7,y-36},RGB(246,190,83),RGB(246,190,83));
 }
 void DrawArena(HDC d){
- Fill(d,{0,0,clientW,clientH},RGB(20,23,27));
- // sky and distant battlements
- Fill(d,{0,0,clientW,390},RGB(30,34,39));
- for(int i=0;i<9;i++){int bx=i*145-20;Fill(d,{bx,245,bx+115,395},RGB(39,42,44));Fill(d,{bx+12,220,bx+32,245},RGB(39,42,44));Fill(d,{bx+72,220,bx+92,245},RGB(39,42,44));}
- Line(d,0,395,clientW,395,gold,2);
- Fill(d,{0,397,clientW,clientH},RGB(54,48,39));
- for(int x=0;x<clientW;x+=100)Line(d,x,398,x-35,clientH,RGB(69,60,48));
- for(int y=435;y<clientH;y+=58)Line(d,0,y,clientW,y,RGB(65,57,46));
- DrawBar(d,65,58,390,player.hp,L"JUGADOR",false);
- DrawBar(d,clientW-455,58,390,enemy.hp,L"RIVAL",true);
- Text(d,L"RONDA  01",clientW/2-55,64,14,gold,true);
- int ground=clientH-95;
+ Fill(d,{0,0,clientW,clientH},RGB(17,20,24));
+ // Dusky sky behind the fortress.
+ Fill(d,{0,0,clientW,170},RGB(31,38,46));
+ Fill(d,{0,170,clientW,315},RGB(43,44,44));
+ Fill(d,{0,315,clientW,405},RGB(54,48,40));
+ EllipseShape(d,{clientW/2-165,52,clientW/2+165,285},RGB(37,40,43),RGB(37,40,43));
+ // Back wall and battlements.
+ Fill(d,{0,235,clientW,411},RGB(68,64,56));
+ for(int x=0;x<clientW;x+=96){
+   Fill(d,{x+5,214,x+76,241},RGB(83,77,66));
+   Fill(d,{x+16,198,x+32,218},RGB(83,77,66));
+   Fill(d,{x+49,198,x+65,218},RGB(83,77,66));
+ }
+ for(int row=0;row<4;row++){
+   int yy=252+row*37;
+   Line(d,0,yy,clientW,yy,RGB(48,48,45),2);
+   for(int x=(row%2)*48;x<clientW;x+=96)Line(d,x,yy-35,x,yy,RGB(49,48,45),2);
+ }
+ // Central gate, framed by stone blocks.
+ Fill(d,{clientW/2-118,254,clientW/2+118,411},RGB(34,34,33));
+ EllipseShape(d,{clientW/2-118,205,clientW/2+118,355},RGB(34,34,33),RGB(103,91,72));
+ Fill(d,{clientW/2-105,295,clientW/2+105,411},RGB(27,29,30));
+ for(int i=0;i<8;i++)Line(d,clientW/2-92+i*26,300,clientW/2-92+i*26,411,RGB(62,59,52),3);
+ // Side towers and stone columns.
+ for(int side=0;side<2;side++){
+   int x=side?clientW-112:28;
+   Fill(d,{x,165,x+84,411},RGB(91,82,68));Frame(d,{x,165,x+84,411},RGB(39,39,37));
+   for(int yy=185;yy<400;yy+=43)Line(d,x,yy,x+84,yy,RGB(54,52,47),2);
+   Fill(d,{x-10,155,x+94,177},RGB(111,97,76));
+   Fill(d,{x+19,207,x+64,275},RGB(34,34,32));
+   DrawTorch(d,x+42,331);
+ }
+ DrawBanner(d,clientW/2-310,184,RGB(105,45,39));
+ DrawBanner(d,clientW/2+245,184,RGB(42,65,88));
+ // Audience silhouettes behind the fighting area.
+ for(int row=0;row<2;row++)for(int x=155;x<clientW-145;x+=34){
+   int y=349+row*22;
+   EllipseShape(d,{x-6,y-17,x+7,y-4},RGB(32+row*4,31+row*3,29),RGB(32,31,29));
+   Line(d,x,y-5,x,y+12,RGB(31,30,29),6);
+ }
+ Line(d,0,408,clientW,408,gold,3);
+ // Stone arena floor with perspective seams and individual block joints.
+ Fill(d,{0,411,clientW,clientH},RGB(73,64,51));
+ for(int row=0;row<7;row++){
+   int yy=420+row*std::max(25,(clientH-420)/7);
+   Line(d,0,yy,clientW,yy,RGB(51,48,42),2);
+   int step=112-row*7;
+   for(int x=(row%2)*step;x<clientW;x+=step)Line(d,x,yy-step/2,x,yy+step/2,RGB(54,50,43),2);
+ }
+ for(int x=0;x<clientW;x+=160)Line(d,x,412,x-105,clientH,RGB(91,78,59),1);
+ // Foreground edge and corner stones.
+ Fill(d,{0,clientH-30,clientW,clientH},RGB(39,37,33));
+ Line(d,0,clientH-30,clientW,clientH-30,RGB(130,107,72),2);
+ // Combat HUD.
+ Fill(d,{38,28,clientW-38,105},RGB(18,21,24));Frame(d,{38,28,clientW-38,105},RGB(91,78,59));
+ DrawBar(d,65,64,365,player.hp,L"GUERRERO AZUL",false);
+ DrawBar(d,clientW-430,64,365,enemy.hp,L"GUERRERO ROJO",true);
+ Text(d,L"CONFLICT",clientW/2-68,34,16,pale,true,DT_CENTER);
+ Text(d,RustReady()?L"RUST CORE  /  ONLINE":L"RUST CORE  /  FALLBACK",clientW/2-95,70,10,RustReady()?RGB(133,177,132):muted,true,DT_CENTER);
+ wchar_t roundLabel[32]{};wsprintfW(roundLabel,L"RONDA  %02d",roundNumber);
+ Text(d,roundLabel,clientW/2-55,119,13,gold,true,DT_CENTER);
+ int ground=clientH-82;
  DrawFighter(d,player,true,ground);DrawFighter(d,enemy,false,ground);
- Line(d,0,ground,clientW,ground,RGB(150,122,78),2);
- Text(d,L"A / D o FLECHAS  MOVER     J  ATACAR     K  BLOQUEAR     R  REINICIAR     ESC  MENÚ",35,clientH-53,13,pale,true);
- if(gameOver){Fill(d,{clientW/2-245,clientH/2-92,clientW/2+245,clientH/2+88},RGB(17,19,21));Frame(d,{clientW/2-245,clientH/2-92,clientW/2+245,clientH/2+88},gold);Text(d,playerWon?L"VICTORIA":L"DERROTA",clientW/2-150,clientH/2-60,36,playerWon?gold:pale,true);Text(d,L"Pulsa R para otra ronda o ESC para salir",clientW/2-205,clientH/2+8,15,pale);}
+ Line(d,0,ground,clientW,ground,RGB(153,126,83),2);
+ Text(d,L"A / D o FLECHAS  MOVER     J  ATACAR     K  BLOQUEAR     R  REINICIAR     ESC  MENÚ",35,clientH-53,12,pale,true,DT_CENTER);
+ if(gameOver){
+   Fill(d,{clientW/2-255,clientH/2-100,clientW/2+255,clientH/2+96},RGB(17,19,21));
+   Frame(d,{clientW/2-255,clientH/2-100,clientW/2+255,clientH/2+96},gold);
+   Text(d,playerWon?L"VICTORIA":L"DERROTA",clientW/2-155,clientH/2-69,36,playerWon?gold:pale,true,DT_CENTER);
+   Text(d,L"La arena tiene un vencedor",clientW/2-145,clientH/2-15,14,muted,false,DT_CENTER);
+   Text(d,L"Pulsa R para otra ronda o ESC para salir",clientW/2-205,clientH/2+45,14,pale,false,DT_CENTER);
+ }
 }
 void DrawSubpage(HDC d){
  const wchar_t*head=L"";const wchar_t*l1=L"",*l2=L"",*l3=L"";
@@ -101,7 +231,11 @@ void Paint(HWND hwnd){PAINTSTRUCT ps;HDC dc=BeginPaint(hwnd,&ps);RECT rc;GetClie
 void Hit(Fighter&target,Fighter&attacker,bool fromPlayer){
  if(target.hp<=0||target.hurt>0)return;
  float dist=std::abs(target.x-attacker.x);
- if(dist<112){int damage=target.blocking?4:14;target.hp=std::max(0,target.hp-damage);target.hurt=0.18f;}
+ bool inRange=rustCanHit?rustCanHit(dist,112.0f)!=0:dist<112.0f;
+ if(inRange){
+   int damage=rustDamage?rustDamage(14,target.blocking?1:0):(target.blocking?4:14);
+   target.hp=std::max(0,target.hp-damage);target.hurt=0.18f;
+ }
 }
 void Update(HWND hwnd){
  if(page!=Page::QuickFight||gameOver)return;
@@ -138,16 +272,16 @@ LRESULT CALLBACK WndProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp){
    if(wp==VK_ESCAPE){page=Page::Menu;selected=0;KillTimer(hwnd,1);InvalidateRect(hwnd,nullptr,FALSE);}
    else if(page==Page::Menu&&(wp==VK_DOWN||wp==VK_UP)){selected=(selected+(wp==VK_DOWN?1:MENU_COUNT-1))%MENU_COUNT;InvalidateRect(hwnd,nullptr,FALSE);}
    else if(page==Page::Menu&&wp==VK_RETURN)Activate(hwnd);
-   else if(page==Page::QuickFight&&wp=='R'){ResetFight();InvalidateRect(hwnd,nullptr,FALSE);}
+   else if(page==Page::QuickFight&&wp=='R'){ResetFight(true);InvalidateRect(hwnd,nullptr,FALSE);}
    return 0;
  case WM_KEYUP:if(wp<256)keys[wp]=false;return 0;
  case WM_MOUSEMOVE:if(page==Page::Menu){POINT p{GET_X_LPARAM(lp),GET_Y_LPARAM(lp)};int n=-1;for(int i=0;i<MENU_COUNT;i++){RECT r=MenuRect(i);if(PtInRect(&r,p))n=i;}if(n!=hover){hover=n;InvalidateRect(hwnd,nullptr,FALSE);}}return 0;
  case WM_LBUTTONUP:if(page==Page::Menu){POINT p{GET_X_LPARAM(lp),GET_Y_LPARAM(lp)};for(int i=0;i<MENU_COUNT;i++){RECT r=MenuRect(i);if(PtInRect(&r,p)){selected=i;Activate(hwnd);break;}}}else if(page!=Page::QuickFight){page=Page::Menu;selected=0;InvalidateRect(hwnd,nullptr,FALSE);}return 0;
- case WM_DESTROY:KillTimer(hwnd,1);PostQuitMessage(0);return 0;
+ case WM_DESTROY:KillTimer(hwnd,1);if(rustModule){FreeLibrary(rustModule);rustModule=nullptr;}PostQuitMessage(0);return 0;
  }return DefWindowProcW(hwnd,msg,wp,lp);
 }
 }
 int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR,int show){
  SetProcessDPIAware();WNDCLASSW wc{};wc.lpfnWndProc=WndProc;wc.hInstance=instance;wc.lpszClassName=L"ConflictWindow";wc.hCursor=LoadCursor(nullptr,IDC_ARROW);wc.hbrBackground=(HBRUSH)(COLOR_WINDOW+1);RegisterClassW(&wc);
- RECT r{0,0,1100,780};AdjustWindowRect(&r,WS_OVERLAPPEDWINDOW,FALSE);HWND hwnd=CreateWindowExW(0,wc.lpszClassName,L"CONFLICT — Ages of War",WS_OVERLAPPEDWINDOW|WS_VISIBLE,CW_USEDEFAULT,CW_USEDEFAULT,r.right-r.left,r.bottom-r.top,nullptr,nullptr,instance,nullptr);if(!hwnd)return 1;ShowWindow(hwnd,show);UpdateWindow(hwnd);MSG msg{};while(GetMessageW(&msg,nullptr,0,0)>0){TranslateMessage(&msg);DispatchMessageW(&msg);}return (int)msg.wParam;
+ RECT r{0,0,1100,780};AdjustWindowRect(&r,WS_OVERLAPPEDWINDOW,FALSE);HWND hwnd=CreateWindowExW(0,wc.lpszClassName,L"CONFLICT — Ages of War",WS_OVERLAPPEDWINDOW|WS_VISIBLE,CW_USEDEFAULT,CW_USEDEFAULT,r.right-r.left,r.bottom-r.top,nullptr,nullptr,instance,nullptr);if(!hwnd)return 1;LoadRustCore();ShowWindow(hwnd,show);UpdateWindow(hwnd);MSG msg{};while(GetMessageW(&msg,nullptr,0,0)>0){TranslateMessage(&msg);DispatchMessageW(&msg);}return (int)msg.wParam;
 }
