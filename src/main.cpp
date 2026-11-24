@@ -1,5 +1,3 @@
-#define UNICODE
-#define _UNICODE
 #include <windows.h>
 #include <windowsx.h>
 #include <string>
@@ -228,7 +226,7 @@ void DrawSubpage(HDC d){
  Text(d,L"CONFLICT  /  MENÚ PRINCIPAL",70,38,12,muted,true);Line(d,70,66,clientW-70,66,RGB(55,49,40));Text(d,head,70,130,42,pale,true);Line(d,70,194,clientW-70,194,gold,2);Text(d,l1,76,245,18,pale);Text(d,l2,76,300,18,pale);Text(d,l3,76,355,18,gold,true);Text(d,L"VOLVER  [ESC]",70,clientH-110,16,pale,true);
 }
 void Paint(HWND hwnd){PAINTSTRUCT ps;HDC dc=BeginPaint(hwnd,&ps);RECT rc;GetClientRect(hwnd,&rc);clientW=rc.right;clientH=rc.bottom;HDC mem=CreateCompatibleDC(dc);HBITMAP bmp=CreateCompatibleBitmap(dc,clientW,clientH);HBITMAP old=(HBITMAP)SelectObject(mem,bmp);Fill(mem,{0,0,clientW,clientH},bg);if(page==Page::Menu)DrawMenu(mem);else if(page==Page::QuickFight)DrawArena(mem);else DrawSubpage(mem);BitBlt(dc,0,0,clientW,clientH,mem,0,0,SRCCOPY);SelectObject(mem,old);DeleteObject(bmp);DeleteDC(mem);EndPaint(hwnd,&ps);}
-void Hit(Fighter&target,Fighter&attacker,bool fromPlayer){
+void Hit(Fighter&target,Fighter&attacker){
  if(target.hp<=0||target.hurt>0)return;
  float dist=std::abs(target.x-attacker.x);
  bool inRange=rustCanHit?rustCanHit(dist,112.0f)!=0:dist<112.0f;
@@ -251,12 +249,12 @@ void Update(HWND hwnd){
  if(enemy.cooldown>0)enemy.cooldown-=dt;
  if(player.hurt>0)player.hurt-=dt;
  if(enemy.hurt>0)enemy.hurt-=dt;
- if(keys['J']&&player.cooldown<=0){player.attack=0.22f;player.cooldown=0.48f;Hit(enemy,player,true);}
+ if(keys['J']&&player.cooldown<=0){player.attack=0.22f;player.cooldown=0.48f;Hit(enemy,player);}
  // Simple rival AI: approach, then strike when close.
  float dist=std::abs(enemy.x-player.x);
  enemy.blocking=dist<125 && player.attack>0.05f;
  if(dist>100)enemy.x+=(enemy.x>player.x?-1:1)*125*dt;
- else if(enemy.cooldown<=0){enemy.attack=0.2f;enemy.cooldown=0.95f;Hit(player,enemy,false);}
+ else if(enemy.cooldown<=0){enemy.attack=0.2f;enemy.cooldown=0.95f;Hit(player,enemy);}
  enemy.x=std::clamp(enemy.x,45.0f,(float)clientW-45);
  if(player.hp<=0||enemy.hp<=0){gameOver=true;playerWon=enemy.hp<=0;}
  InvalidateRect(hwnd,nullptr,FALSE);
