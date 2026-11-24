@@ -612,6 +612,32 @@ Renderer* renderer=nullptr;
 LONG_PTR savedStyle{};
 RECT savedRect{};
 bool borderless=false;
+bool antonFontLoaded=false;
+
+void LoadAntonFont() {
+    wchar_t exePath[MAX_PATH]{};
+    const DWORD n=GetModuleFileNameW(nullptr,exePath,MAX_PATH);
+    if(!n||n>=MAX_PATH)return;
+    std::wstring fontPath(exePath);
+    const auto slash=fontPath.find_last_of(L"\\/");
+    if(slash!=std::wstring::npos)fontPath.resize(slash+1);
+    fontPath+=L"Anton-Regular.ttf";
+    antonFontLoaded=AddFontResourceExW(fontPath.c_str(),FR_PRIVATE,nullptr)>0;
+}
+
+void UnloadAntonFont() {
+    if(!antonFontLoaded)return;
+    wchar_t exePath[MAX_PATH]{};
+    const DWORD n=GetModuleFileNameW(nullptr,exePath,MAX_PATH);
+    if(n&&n<MAX_PATH) {
+        std::wstring fontPath(exePath);
+        const auto slash=fontPath.find_last_of(L"\\/");
+        if(slash!=std::wstring::npos)fontPath.resize(slash+1);
+        fontPath+=L"Anton-Regular.ttf";
+        RemoveFontResourceExW(fontPath.c_str(),FR_PRIVATE,nullptr);
+    }
+    antonFontLoaded=false;
+}
 
 void LoadSimulation() {
     wchar_t path[MAX_PATH]{};
@@ -826,6 +852,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT message,WPARAM wParam,LPARAM lParam) 
         info->ptMinTrackSize.x=960;info->ptMinTrackSize.y=640;return 0;
     }
     case WM_DESTROY:
+        UnloadAntonFont();
         if(rustModule){FreeLibrary(rustModule);rustModule=nullptr;}
         PostQuitMessage(0);return 0;
     default:
@@ -836,6 +863,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT message,WPARAM wParam,LPARAM lParam) 
 
 int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR,int show) {
     SetProcessDPIAware();
+    LoadAntonFont();
     WNDCLASSEXW wc{sizeof(WNDCLASSEXW)};
     wc.style=CS_HREDRAW|CS_VREDRAW;wc.lpfnWndProc=WindowProc;wc.hInstance=instance;
     wc.hCursor=LoadCursorW(nullptr,IDC_ARROW);wc.hbrBackground=nullptr;wc.lpszClassName=WINDOW_CLASS;
