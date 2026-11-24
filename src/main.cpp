@@ -143,13 +143,13 @@ void BuildTree(MeshBuilder& mesh,float x,float z,float scale) {
 
 void BuildWorld(MeshBuilder& mesh) {
     // The rocky underside is a visible physical base, not a 2D map.
-    mesh.Box(0.0f,-0.72f,0.0f,32.0f,1.15f,24.0f,ROCK);
-    mesh.Box(0.0f,-1.30f,0.0f,31.4f,0.18f,23.4f,ROCK_DARK);
+    mesh.Box(0.0f,-0.475f,0.0f,32.0f,1.15f,24.0f,ROCK);
+    mesh.Box(0.0f,-1.14f,0.0f,31.4f,0.18f,23.4f,ROCK_DARK);
     // Low-poly broken stone facets around the base edge.
     for(int i=0;i<18;++i) {
         float x=-14.5f+i*1.7f;
-        mesh.Box(x,-0.72f,-11.93f,1.25f,0.34f,0.12f,(i%2)?ROCK_LIGHT:ROCK_DARK);
-        mesh.Box(x,-0.72f,11.93f,1.25f,0.34f,0.12f,(i%3)?ROCK:ROCK_LIGHT);
+        mesh.Box(x,-0.475f,-11.93f,1.25f,0.34f,0.12f,(i%2)?ROCK_LIGHT:ROCK_DARK);
+        mesh.Box(x,-0.475f,11.93f,1.25f,0.34f,0.12f,(i%3)?ROCK:ROCK_LIGHT);
     }
 
     // Uneven soil plane with smooth rolling ground.
