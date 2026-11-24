@@ -1,12 +1,16 @@
 # CONFLICT
 
-Conflict is a lightweight 2D historical fighting game prototype. The first milestone is a native Windows menu and interface, built without Unity, Unreal, Godot, or a browser-based wrapper.
+Conflict is a native Windows 2D historical fighting game prototype, built with C++17, Win32 and GDI. It does not use Unity, Unreal, Godot, HTML or a browser wrapper.
 
-## Current milestone
-- Native Windows desktop application (Win32 + GDI).
-- Main menu with Campaign, Quick Fight, Arsenal, Eras, Settings, and Exit.
-- Dark medieval visual direction with a timeline spanning year 0 to the modern era.
-- Keyboard and mouse navigation.
+## Version 0.2.0 — 2D Arena
+- Playable arena launched from **Combate rápido**.
+- Player versus a basic computer-controlled rival.
+- Health bars, victory/defeat state and round restart.
+- Medieval courtyard arena and simple fighter/sword artwork drawn in code.
+- Keyboard controls: A/D or Left/Right to move, J to attack, K to block, R to restart, Esc to return to menu.
+
+## Current limitations
+This is an early gameplay prototype. It currently has placeholder 2D character artwork, one arena, one opponent behavior and no campaign progression, sound, online multiplayer or weapon selection yet.
 
 ## Build
 Requires Windows 10/11 and Visual Studio 2022 Build Tools with the Desktop development with C++ workload.
@@ -17,11 +21,3 @@ cmake --build build --config Release
 ```
 
 The executable is produced at `build/Release/Conflict.exe`.
-
-## Controls
-- Mouse: select menu items.
-- Up / Down: move selection.
-- Enter: activate selection.
-- Escape: return to the main menu.
-
-This is the interface milestone. Combat systems and historical equipment will be added in later versions.
