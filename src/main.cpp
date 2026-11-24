@@ -32,12 +32,16 @@ struct Vertex {
 struct UnitView {
     float x;
     float z;
+    float heading;
     std::uint32_t team;
     std::uint32_t alive;
+    std::uint32_t kind;
+    float supportPulse;
 };
 
 struct MatrixBuffer {
     XMFLOAT4X4 viewProjection;
+    XMFLOAT4 lighting;
 };
 
 struct MeshBuilder {
@@ -64,19 +68,32 @@ struct MeshBuilder {
         Triangle(a, c, d, color);
     }
 
-    void Box(float cx, float cy, float cz, float sx, float sy, float sz,
-             const XMFLOAT4& color) {
-        const float x0=cx-sx*0.5f, x1=cx+sx*0.5f;
-        const float y0=cy-sy*0.5f, y1=cy+sy*0.5f;
-        const float z0=cz-sz*0.5f, z1=cz+sz*0.5f;
-        const XMFLOAT3 p000{x0,y0,z0}, p001{x0,y0,z1}, p010{x0,y1,z0}, p011{x0,y1,z1};
-        const XMFLOAT3 p100{x1,y0,z0}, p101{x1,y0,z1}, p110{x1,y1,z0}, p111{x1,y1,z1};
-        Quad(p000,p100,p110,p010,color);
-        Quad(p101,p001,p011,p111,color);
-        Quad(p001,p000,p010,p011,color);
-        Quad(p100,p101,p111,p110,color);
-        Quad(p010,p110,p111,p011,color);
-        Quad(p001,p101,p100,p000,color);
+    XMFLOAT3 RotatePoint(float x,float y,float z,float yaw) const {
+        const float c=std::cos(yaw), s=std::sin(yaw);
+        return XMFLOAT3{x*c+z*s,y,-x*s+z*c};
+    }
+
+    void BoxYaw(float cx,float cy,float cz,float sx,float sy,float sz,
+                float yaw,const XMFLOAT4& color) {
+        const float x0=-sx*0.5f,x1=sx*0.5f;
+        const float y0=-sy*0.5f,y1=sy*0.5f;
+        const float z0=-sz*0.5f,z1=sz*0.5f;
+        auto p=[&](float x,float y,float z) {
+            const auto r=RotatePoint(x,y,z,yaw);
+            return XMFLOAT3{cx+r.x,cy+r.y,cz+r.z};
+        };
+        const XMFLOAT3 p000=p(x0,y0,z0),p001=p(x0,y0,z1),p010=p(x0,y1,z0),p011=p(x0,y1,z1);
+        const XMFLOAT3 p100=p(x1,y0,z0),p101=p(x1,y0,z1),p110=p(x1,y1,z0),p111=p(x1,y1,z1);
+        Quad(p000,p001,p011,p010,color);
+        Quad(p100,p110,p111,p101,color);
+        Quad(p000,p010,p110,p100,color);
+        Quad(p001,p101,p111,p011,color);
+        Quad(p000,p100,p101,p001,color);
+        Quad(p010,p011,p111,p110,color);
+    }
+
+    void Box(float cx,float cy,float cz,float sx,float sy,float sz,const XMFLOAT4& color) {
+        BoxYaw(cx,cy,cz,sx,sy,sz,0.0f,color);
     }
 
     void Cylinder(float x, float y, float z, float radius, float height,
@@ -111,8 +128,8 @@ struct MeshBuilder {
                 };
                 const auto a=point(lat0,lon0), b=point(lat0,lon1);
                 const auto c=point(lat1,lon1), d=point(lat1,lon0);
-                Triangle(a,b,c,color);
-                Triangle(a,c,d,color);
+                Triangle(a,c,b,color);
+                Triangle(a,d,c,color);
             }
         }
     }
@@ -131,17 +148,25 @@ float TerrainHeight(float x,float z) {
                  + 0.075f*std::cos(z*0.43f+x*0.11f);
 }
 
-void BuildTree(MeshBuilder& mesh,float x,float z,float scale) {
+void BuildTree(MeshBuilder& mesh,float x,float z,float scale,int quality) {
     const float ground=TerrainHeight(x,z);
-    mesh.Cylinder(x,ground,z,0.13f*scale,1.55f*scale,TRUNK,8);
-    mesh.Sphere(x,ground+1.95f*scale,z,0.78f*scale,0.88f*scale,0.78f*scale,LEAF_A,8,10);
-    mesh.Sphere(x-0.42f*scale,ground+1.72f*scale,z+0.22f*scale,
-                0.52f*scale,0.62f*scale,0.54f*scale,LEAF_B,7,9);
-    mesh.Sphere(x+0.39f*scale,ground+1.78f*scale,z-0.18f*scale,
-                0.55f*scale,0.63f*scale,0.53f*scale,LEAF_C,7,9);
+    const int trunkSegments=quality==0?6:(quality==1?8:12);
+    const int rings=quality==0?6:(quality==1?8:12);
+    const int slices=quality==0?8:(quality==1?10:16);
+    mesh.Cylinder(x,ground,z,0.13f*scale,1.55f*scale,TRUNK,trunkSegments);
+    mesh.Sphere(x,ground+1.95f*scale,z,0.78f*scale,0.88f*scale,0.78f*scale,LEAF_A,rings,slices);
+    if(quality>0) {
+        mesh.Sphere(x-0.42f*scale,ground+1.72f*scale,z+0.22f*scale,
+                    0.52f*scale,0.62f*scale,0.54f*scale,LEAF_B,rings-1,slices-1);
+        mesh.Sphere(x+0.39f*scale,ground+1.78f*scale,z-0.18f*scale,
+                    0.55f*scale,0.63f*scale,0.53f*scale,LEAF_C,rings-1,slices-1);
+    }
+    if(quality==2) {
+        mesh.Sphere(x,ground+2.42f*scale,z,0.42f*scale,0.45f*scale,0.42f*scale,LEAF_C,7,10);
+    }
 }
 
-void BuildWorld(MeshBuilder& mesh) {
+void BuildWorld(MeshBuilder& mesh,int quality) {
     // The rocky underside is a visible physical base, not a 2D map.
     mesh.Box(0.0f,-0.475f,0.0f,32.0f,1.15f,24.0f,ROCK);
     mesh.Box(0.0f,-1.14f,0.0f,31.4f,0.18f,23.4f,ROCK_DARK);
@@ -153,7 +178,8 @@ void BuildWorld(MeshBuilder& mesh) {
     }
 
     // Uneven soil plane with smooth rolling ground.
-    constexpr int NX=48, NZ=36;
+    const int NX=quality==0?24:(quality==1?48:80);
+    const int NZ=quality==0?18:(quality==1?36:60);
     constexpr float XMIN=-14.7f, XMAX=14.7f, ZMIN=-10.7f, ZMAX=10.7f;
     for(int iz=0;iz<NZ;++iz) {
         for(int ix=0;ix<NX;++ix) {
@@ -182,15 +208,112 @@ void BuildWorld(MeshBuilder& mesh) {
         {-1.4f,9.1f,0.90f},{2.5f,9.0f,0.98f},{6.5f,9.0f,0.91f},
         {10.0f,8.9f,1.02f},{13.0f,8.1f,0.92f}
     };
-    for(const auto& tree:trees) BuildTree(mesh,tree[0],tree[1],tree[2]);
+    for(const auto& tree:trees) BuildTree(mesh,tree[0],tree[1],tree[2],quality);
 
     // A few scattered stones give the soil a natural edge.
     const float stones[][2]={{-11.8f,-6.9f},{-8.7f,7.5f},{-5.9f,-7.8f},{6.0f,7.7f},
                              {9.8f,-7.2f},{12.1f,6.8f},{-12.0f,5.8f},{3.0f,7.7f}};
     for(const auto& s:stones) {
         float y=TerrainHeight(s[0],s[1]);
-        mesh.Sphere(s[0],y+0.13f,s[1],0.38f,0.20f,0.31f,ROCK_LIGHT,5,7);
+        mesh.Sphere(s[0],y+0.13f,s[1],0.38f,0.20f,0.31f,ROCK_LIGHT,
+                    quality==0?4:(quality==1?6:9),quality==0?6:(quality==1?8:12));
     }
+    if(quality==2) {
+        for(int i=0;i<28;++i) {
+            const float x=-13.8f+static_cast<float>(i%14)*2.12f;
+            const float z=(i<14?-7.8f:7.8f);
+            const float y=TerrainHeight(x,z);
+            mesh.Sphere(x,y+0.035f,z,0.11f,0.045f,0.16f,
+                        (i%2)?LEAF_B:ROCK_DARK,4,6);
+        }
+    }
+}
+
+
+
+void BuildSupportRing(MeshBuilder& mesh,float x,float y,float z,float pulse,int quality) {
+    if(pulse<=0.0f) return;
+    const int segments=quality==0?10:(quality==1?16:28);
+    const float alpha=std::clamp(pulse/0.18f,0.0f,1.0f)*0.62f;
+    const XMFLOAT4 glow{0.22f,0.82f,0.48f,alpha};
+    const float inner=0.62f,outer=0.78f;
+    for(int i=0;i<segments;++i) {
+        const float a0=2.0f*PI*i/segments,a1=2.0f*PI*(i+1)/segments;
+        const XMFLOAT3 p0{x+std::cos(a0)*inner,y,z+std::sin(a0)*inner};
+        const XMFLOAT3 p1{x+std::cos(a0)*outer,y,z+std::sin(a0)*outer};
+        const XMFLOAT3 p2{x+std::cos(a1)*outer,y,z+std::sin(a1)*outer};
+        const XMFLOAT3 p3{x+std::cos(a1)*inner,y,z+std::sin(a1)*inner};
+        mesh.Quad(p0,p1,p2,p3,glow);
+    }
+}
+
+void BuildPerson(MeshBuilder& mesh,const UnitView& unit,int quality,float time) {
+    const float x=unit.x,z=unit.z;
+    const float ground=TerrainHeight(x,z);
+    const float yaw=unit.heading;
+    const XMFLOAT4 team=unit.team==0?XMFLOAT4{0.12f,0.34f,0.76f,1.0f}:XMFLOAT4{0.76f,0.16f,0.13f,1.0f};
+    const XMFLOAT4 armorLight=unit.team==0?XMFLOAT4{0.25f,0.52f,0.91f,1.0f}:XMFLOAT4{0.91f,0.34f,0.26f,1.0f};
+    const XMFLOAT4 dark{0.16f,0.18f,0.19f,1.0f};
+    const XMFLOAT4 skin{0.68f,0.48f,0.34f,1.0f};
+    const float phase=time*5.2f+x*0.71f+z*0.43f;
+    const float walk=std::sin(phase)*0.055f;
+    mesh.Sphere(x,ground+0.035f,z,0.34f,0.022f,0.42f,XMFLOAT4{0.12f,0.13f,0.12f,0.24f},
+                quality==0?5:(quality==1?7:10),quality==0?7:(quality==1?9:14));
+    mesh.BoxYaw(x,ground+0.70f,z,0.46f,0.52f,0.30f,yaw,team);
+    mesh.BoxYaw(x,ground+0.79f,z+0.025f,0.49f,0.16f,0.32f,yaw,armorLight);
+    mesh.Sphere(x,ground+1.12f,z,0.20f,0.22f,0.20f,skin,
+                quality==0?6:(quality==1?8:12),quality==0?8:(quality==1?10:16));
+    mesh.BoxYaw(x-0.14f,ground+0.28f+walk,z,0.16f,0.48f,0.18f,yaw,dark);
+    mesh.BoxYaw(x+0.14f,ground+0.28f-walk,z,0.16f,0.48f,0.18f,yaw,dark);
+    mesh.BoxYaw(x-0.30f,ground+0.70f-walk,z+0.02f,0.14f,0.40f,0.16f,yaw,armorLight);
+    mesh.BoxYaw(x+0.30f,ground+0.70f+walk,z+0.02f,0.14f,0.40f,0.16f,yaw,armorLight);
+    mesh.BoxYaw(x,ground+0.73f,z-0.22f,0.30f,0.39f,0.13f,yaw,dark);
+
+    if(unit.kind==1) { // Medic: pale field cap and a clear medical marking.
+        const XMFLOAT4 white{0.88f,0.90f,0.86f,1.0f};
+        const XMFLOAT4 mark{0.78f,0.13f,0.12f,1.0f};
+        mesh.BoxYaw(x,ground+1.34f,z,0.28f,0.10f,0.26f,yaw,white);
+        mesh.BoxYaw(x,ground+0.72f,z+0.17f,0.075f,0.24f,0.035f,yaw,mark);
+        mesh.BoxYaw(x,ground+0.72f,z+0.17f,0.22f,0.075f,0.035f,yaw,mark);
+    } else if(unit.kind==2) { // Engineer: work helmet and a compact tool pack.
+        const XMFLOAT4 helmet{0.77f,0.61f,0.18f,1.0f};
+        mesh.Sphere(x,ground+1.34f,z,0.23f,0.085f,0.22f,helmet,quality==2?10:6,quality==2?14:8);
+        mesh.BoxYaw(x,ground+0.78f,z-0.27f,0.34f,0.34f,0.19f,yaw,
+                    XMFLOAT4{0.34f,0.31f,0.23f,1.0f});
+        mesh.BoxYaw(x+0.22f,ground+0.57f,z+0.16f,0.11f,0.19f,0.09f,yaw,
+                    XMFLOAT4{0.62f,0.58f,0.47f,1.0f});
+    } else {
+        mesh.BoxYaw(x,ground+1.33f,z,0.30f,0.09f,0.29f,yaw,dark);
+    }
+    BuildSupportRing(mesh,x,ground+0.06f,z,unit.supportPulse,quality);
+}
+
+void BuildSupplyTruck(MeshBuilder& mesh,const UnitView& unit,int quality) {
+    const float x=unit.x,z=unit.z;
+    const float ground=TerrainHeight(x,z);
+    const float yaw=unit.heading;
+    const XMFLOAT4 team=unit.team==0?XMFLOAT4{0.14f,0.38f,0.78f,1.0f}:XMFLOAT4{0.78f,0.18f,0.15f,1.0f};
+    const XMFLOAT4 trim{0.20f,0.22f,0.21f,1.0f};
+    const XMFLOAT4 glass{0.43f,0.62f,0.70f,1.0f};
+    mesh.Sphere(x,ground+0.045f,z,0.62f,0.025f,0.88f,XMFLOAT4{0.10f,0.11f,0.10f,0.24f},
+                quality==0?5:(quality==1?7:10),quality==0?7:(quality==1?9:14));
+    mesh.BoxYaw(x,ground+0.40f,z,0.88f,0.42f,1.48f,yaw,team);
+    mesh.BoxYaw(x,ground+0.72f,z+0.34f,0.79f,0.49f,0.66f,yaw,team);
+    mesh.BoxYaw(x,ground+0.77f,z+0.69f,0.58f,0.22f,0.035f,yaw,glass);
+    mesh.BoxYaw(x,ground+0.66f,z-0.35f,0.76f,0.38f,0.67f,yaw,
+                XMFLOAT4{0.73f,0.72f,0.64f,1.0f});
+    mesh.BoxYaw(x,ground+0.91f,z-0.35f,0.78f,0.06f,0.68f,yaw,trim);
+    for(float side:{-1.0f,1.0f}) {
+        for(float forward:{-0.48f,0.48f}) {
+            mesh.Sphere(x+side*0.43f,ground+0.22f,z+forward,0.17f,0.18f,0.17f,trim,
+                        quality==2?10:6,quality==2?14:8);
+            if(quality>0) {
+                mesh.Sphere(x+side*0.43f,ground+0.22f,z+forward,0.075f,0.08f,0.075f,
+                            XMFLOAT4{0.56f,0.57f,0.53f,1.0f},6,8);
+            }
+        }
+    }
+    BuildSupportRing(mesh,x,ground+0.055f,z,unit.supportPulse,quality);
 }
 
 class Renderer {
