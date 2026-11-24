@@ -600,10 +600,12 @@ float4 PSMain(PSInput input) : SV_TARGET {
 using UpdateFn=void(__cdecl*)(float);
 using GetUnitsFn=std::size_t(__cdecl*)(UnitView*,std::size_t);
 using RoundStateFn=int(__cdecl*)();
+using SpawnFn=int(__cdecl*)(std::uint32_t,std::uint32_t);
 HMODULE rustModule{};
 UpdateFn rustUpdate{};
 GetUnitsFn rustGetUnits{};
 RoundStateFn rustRoundState{};
+SpawnFn rustSpawn{};
 UnitView unitBuffer[MAX_UNITS]{};
 Renderer* renderer=nullptr;
 LONG_PTR savedStyle{};
@@ -623,7 +625,8 @@ void LoadSimulation() {
     rustUpdate=reinterpret_cast<UpdateFn>(GetProcAddress(rustModule,"conflict_update"));
     rustGetUnits=reinterpret_cast<GetUnitsFn>(GetProcAddress(rustModule,"conflict_get_units"));
     rustRoundState=reinterpret_cast<RoundStateFn>(GetProcAddress(rustModule,"conflict_round_state"));
-    if(!rustUpdate||!rustGetUnits||!rustRoundState) {
+    rustSpawn=reinterpret_cast<SpawnFn>(GetProcAddress(rustModule,"conflict_spawn"));
+    if(!rustUpdate||!rustGetUnits||!rustRoundState||!rustSpawn) {
         FreeLibrary(rustModule);rustModule=nullptr;
         rustUpdate=nullptr;rustGetUnits=nullptr;rustRoundState=nullptr;
     }
@@ -646,6 +649,134 @@ void ToggleBorderless(HWND hwnd) {
             savedRect.bottom-savedRect.top,SWP_FRAMECHANGED|SWP_NOZORDER|SWP_NOOWNERZORDER);
         borderless=false;
     }
+}
+
+
+enum class ScreenMode { ChooseTeam, Game, Options, Graphics };
+ScreenMode screenMode=ScreenMode::ChooseTeam;
+int selectedTeam=0;
+int selectedUnitKind=0;
+int frameLimit=60;
+bool cameraDragging=false;
+POINT lastMouse{};
+
+void DrawTextGdi(HDC dc,int x,int y,const wchar_t* value,int height,COLORREF color,bool heading=false) {
+    HFONT font=CreateFontW(-height,0,0,0,heading?FW_BOLD:FW_NORMAL,FALSE,FALSE,FALSE,
+        DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,
+        DEFAULT_PITCH|FF_DONTCARE,heading?L"Anton":L"Segoe UI");
+    HGDIOBJ old=SelectObject(dc,font);
+    SetBkMode(dc,TRANSPARENT);SetTextColor(dc,color);
+    RECT r{x,y,1800,y+height+12};
+    DrawTextW(dc,value,-1,&r,DT_LEFT|DT_SINGLELINE|DT_VCENTER);
+    SelectObject(dc,old);DeleteObject(font);
+}
+
+void DrawPanel(HDC dc,int x,int y,int w,int h) {
+    HBRUSH brush=CreateSolidBrush(RGB(248,248,246));
+    HPEN pen=CreatePen(PS_SOLID,2,RGB(35,38,42));
+    auto oldBrush=SelectObject(dc,brush);auto oldPen=SelectObject(dc,pen);
+    RoundRect(dc,x,y,x+w,y+h,18,18);
+    SelectObject(dc,oldBrush);SelectObject(dc,oldPen);DeleteObject(brush);DeleteObject(pen);
+}
+
+void DrawButton(HDC dc,int x,int y,int w,int h,const wchar_t* label,COLORREF fill,COLORREF ink=RGB(248,248,248)) {
+    HBRUSH brush=CreateSolidBrush(fill);HPEN pen=CreatePen(PS_SOLID,1,RGB(40,42,45));
+    auto ob=SelectObject(dc,brush);auto op=SelectObject(dc,pen);
+    RoundRect(dc,x,y,x+w,y+h,10,10);
+    SelectObject(dc,ob);SelectObject(dc,op);DeleteObject(brush);DeleteObject(pen);
+    DrawTextGdi(dc,x+12,y+4,label,23,ink,true);
+}
+
+void DrawOverlay(HWND hwnd) {
+    HDC dc=GetDC(hwnd);if(!dc)return;
+    RECT client{};GetClientRect(hwnd,&client);
+    const int width=client.right,height=client.bottom;
+    if(screenMode==ScreenMode::Game) {
+        const int y=height-94,x=24,w=172,gap=8;
+        DrawPanel(dc,x-10,y-8,w*4+gap*3+20,82);
+        DrawTextGdi(dc,x,y-4,L"UNIDADES",17,RGB(35,38,42),true);
+        const wchar_t* names[]={L"ESPADACHIN",L"MEDICO",L"CATAPULTA",L"MILITAR MODERNO"};
+        for(int i=0;i<4;++i) {
+            const COLORREF fill=i==selectedUnitKind?RGB(38,43,51):RGB(91,98,106);
+            DrawButton(dc,x+i*(w+gap),y+19,w,42,names[i],fill);
+        }
+        DrawTextGdi(dc,width-320,20,selectedTeam==0?L"EQUIPO AZUL":L"EQUIPO ROJO",18,
+            selectedTeam==0?RGB(35,90,190):RGB(190,45,40),true);
+    } else if(screenMode==ScreenMode::ChooseTeam) {
+        DrawPanel(dc, width/2-280,height/2-190,560,380);
+        DrawTextGdi(dc,width/2-225,height/2-150,L"ELIGE TU EQUIPO",42,RGB(24,27,31),true);
+        DrawButton(dc,width/2-220,height/2-25,205,72,L"AZUL",RGB(30,85,190));
+        DrawButton(dc,width/2+15,height/2-25,205,72,L"ROJO",RGB(185,45,40));
+        DrawTextGdi(dc,width/2-205,height/2+75,L"Pulsa ESC para abrir Opciones",18,RGB(60,64,68));
+    } else if(screenMode==ScreenMode::Options) {
+        DrawPanel(dc,40,35,550,590);
+        DrawTextGdi(dc,78,62,L"OPCIONES",42,RGB(24,27,31),true);
+        DrawButton(dc,78,135,470,58,L"GRAFICOS",RGB(40,45,52));
+        DrawTextGdi(dc,80,220,L"BLOQUEO DE FOTOGRAMAS",19,RGB(40,44,48),true);
+        wchar_t cap[80]{};
+        if(frameLimit==0)wcscpy_s(cap,L"0  |  SIN LIMITE");
+        else swprintf_s(cap,L"%d FPS",frameLimit);
+        DrawTextGdi(dc,80,247,cap,18,RGB(40,44,48));
+        HPEN line=CreatePen(PS_SOLID,7,RGB(90,96,103));auto old=SelectObject(dc,line);
+        MoveToEx(dc,90,290,nullptr);LineTo(dc,510,290);SelectObject(dc,old);DeleteObject(line);
+        const int knob=90+(420*frameLimit/240);
+        HBRUSH k=CreateSolidBrush(RGB(35,90,190));auto ok=SelectObject(dc,k);
+        Ellipse(dc,knob-10,280,knob+10,300);SelectObject(dc,ok);DeleteObject(k);
+        DrawTextGdi(dc,80,315,L"NVIDIA APP",20,RGB(40,44,48),true);
+        DrawTextGdi(dc,80,345,L"Direct3D 11 · Overlay Alt+Z · Requiere NVIDIA App",15,RGB(75,78,82));
+        DrawButton(dc,78,405,470,52,L"VOLVER AL JUEGO",RGB(40,45,52));
+        DrawButton(dc,78,475,470,52,L"ELEGIR EQUIPO",RGB(80,87,95));
+        DrawTextGdi(dc,80,550,L"ESC: volver",15,RGB(80,84,88));
+    } else if(screenMode==ScreenMode::Graphics) {
+        DrawPanel(dc,40,35,550,500);
+        DrawTextGdi(dc,78,62,L"GRAFICOS",42,RGB(24,27,31),true);
+        const wchar_t* names[]={L"BAJO",L"MEDIO",L"ALTO",L"ULTRA"};
+        for(int i=0;i<4;++i) {
+            DrawButton(dc,78,135+i*70,470,52,names[i],renderer&&renderer->Quality()==i?RGB(35,90,190):RGB(55,60,67));
+        }
+        DrawButton(dc,78,430,470,52,L"VOLVER A OPCIONES",RGB(40,45,52));
+    }
+    ReleaseDC(hwnd,dc);
+}
+
+void HandleUiClick(HWND hwnd,int x,int y) {
+    RECT client{};GetClientRect(hwnd,&client);const int width=client.right,height=client.bottom;
+    if(screenMode==ScreenMode::ChooseTeam) {
+        if(y>=height/2-25&&y<=height/2+47) {
+            if(x>=width/2-220&&x<=width/2-15){selectedTeam=0;screenMode=ScreenMode::Game;}
+            else if(x>=width/2+15&&x<=width/2+220){selectedTeam=1;screenMode=ScreenMode::Game;}
+        }
+    } else if(screenMode==ScreenMode::Game) {
+        const int base=24,w=172,gap=8,top=height-75;
+        if(y>=top&&y<=top+42) {
+            for(int i=0;i<4;++i) {
+                const int left=base+i*(w+gap);
+                if(x>=left&&x<=left+w) {
+                    selectedUnitKind=i;
+                    if(rustSpawn)rustSpawn(static_cast<std::uint32_t>(selectedTeam),static_cast<std::uint32_t>(selectedUnitKind));
+                    break;
+                }
+            }
+        }
+    } else if(screenMode==ScreenMode::Options) {
+        if(x>=78&&x<=548) {
+            if(y>=135&&y<=193)screenMode=ScreenMode::Graphics;
+            else if(y>=275&&y<=305) {
+                const int value=std::clamp((x-90)*240/420,0,240);
+                frameLimit=value==0?0:std::clamp(((value+5)/10)*10,10,240);
+            } else if(y>=405&&y<=457)screenMode=ScreenMode::Game;
+            else if(y>=475&&y<=527)screenMode=ScreenMode::ChooseTeam;
+        }
+    } else if(screenMode==ScreenMode::Graphics) {
+        if(x>=78&&x<=548) {
+            if(y>=135&&y<=187&&renderer)renderer->SetQuality(0);
+            else if(y>=205&&y<=257&&renderer)renderer->SetQuality(1);
+            else if(y>=275&&y<=327&&renderer)renderer->SetQuality(2);
+            else if(y>=345&&y<=397&&renderer)renderer->SetQuality(3);
+            else if(y>=430&&y<=482)screenMode=ScreenMode::Options;
+        }
+    }
+    InvalidateRect(hwnd,nullptr,FALSE);
 }
 
 LRESULT CALLBACK WindowProc(HWND hwnd,UINT message,WPARAM wParam,LPARAM lParam) {
