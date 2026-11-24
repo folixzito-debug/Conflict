@@ -364,6 +364,25 @@ public:
     int Quality() const { return quality; }
     UINT Samples() const { return sampleCount; }
 
+    void MoveCamera(float forward,float right,float vertical,float dt) {
+        const float speed=12.0f*dt;
+        cameraPosition.x+=(std::sin(cameraYaw)*forward+std::cos(cameraYaw)*right)*speed;
+        cameraPosition.z+=(std::cos(cameraYaw)*forward-std::sin(cameraYaw)*right)*speed;
+        cameraPosition.y+=vertical*speed;
+        cameraPosition.y=std::clamp(cameraPosition.y,2.0f,80.0f);
+    }
+    void RotateCamera(float dx,float dy) {
+        cameraYaw+=dx*0.0045f;
+        cameraPitch=std::clamp(cameraPitch-dy*0.0045f,-1.45f,1.45f);
+    }
+    void ZoomCamera(float amount) {
+        const float cp=std::cos(cameraPitch);
+        cameraPosition.x+=std::sin(cameraYaw)*cp*amount;
+        cameraPosition.y+=std::sin(cameraPitch)*amount;
+        cameraPosition.z+=std::cos(cameraYaw)*cp*amount;
+        cameraPosition.y=std::clamp(cameraPosition.y,2.0f,80.0f);
+    }
+
     void Render(const UnitView* units,UINT unitCount,float time) {
         if(!context || !renderTarget || !depthView) return;
         const float white[4]={1.0f,1.0f,1.0f,1.0f};
@@ -379,8 +398,10 @@ public:
         context->PSSetShader(pixelShader.Get(),nullptr,0);
         context->VSSetConstantBuffers(0,1,constantBuffer.GetAddressOf());
 
-        XMVECTOR eye=XMVectorSet(0.0f,24.0f,-36.0f,1.0f);
-        XMVECTOR focus=XMVectorSet(0.0f,0.0f,0.0f,1.0f);
+        XMVECTOR eye=XMVectorSet(cameraPosition.x,cameraPosition.y,cameraPosition.z,1.0f);
+        const float cp=std::cos(cameraPitch);
+        XMVECTOR direction=XMVectorSet(std::sin(cameraYaw)*cp,std::sin(cameraPitch),std::cos(cameraYaw)*cp,0.0f);
+        XMVECTOR focus=eye+direction;
         XMMATRIX view=XMMatrixLookAtLH(eye,focus,XMVectorSet(0.0f,1.0f,0.0f,0.0f));
         XMMATRIX projection=XMMatrixPerspectiveFovLH(XMConvertToRadians(43.0f),aspect,0.1f,150.0f);
         MatrixBuffer matrices{};
@@ -571,6 +592,8 @@ float4 PSMain(PSInput input) : SV_TARGET {
     UINT sampleCount=1,renderWidth=0,renderHeight=0;
     int quality=1;
     float aspect=16.0f/9.0f;
+    XMFLOAT3 cameraPosition{0.0f,19.0f,-29.0f};
+    float cameraYaw=0.0f,cameraPitch=-0.54f;
     D3D11_VIEWPORT viewport{};
 };
 
