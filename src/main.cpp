@@ -340,22 +340,37 @@ public:
         }
         if(FAILED(hr)) return false;
         if(!CreateShaders() || !CreateBuffers() || !CreateStates()) return false;
+        SelectSampleCount();
         RECT client{};GetClientRect(hwnd,&client);
         return Resize(static_cast<UINT>(client.right-client.left),static_cast<UINT>(client.bottom-client.top));
     }
 
     bool Resize(UINT width,UINT height) {
         if(!swapChain || !width || !height) return true;
-        renderTarget.Reset();depthView.Reset();depthTexture.Reset();
+        renderWidth=width;renderHeight=height;
+        renderTarget.Reset();sceneColorTexture.Reset();depthView.Reset();depthTexture.Reset();
         HRESULT hr=swapChain->ResizeBuffers(0,width,height,DXGI_FORMAT_UNKNOWN,0);
         if(FAILED(hr)) return false;
         ComPtr<ID3D11Texture2D> backBuffer;
         hr=swapChain->GetBuffer(0,IID_PPV_ARGS(&backBuffer));if(FAILED(hr))return false;
-        hr=device->CreateRenderTargetView(backBuffer.Get(),nullptr,&renderTarget);if(FAILED(hr))return false;
+
+        if(sampleCount==1) {
+            hr=device->CreateRenderTargetView(backBuffer.Get(),nullptr,&renderTarget);
+            if(FAILED(hr))return false;
+        } else {
+            D3D11_TEXTURE2D_DESC colorDesc{};
+            colorDesc.Width=width;colorDesc.Height=height;colorDesc.MipLevels=1;colorDesc.ArraySize=1;
+            colorDesc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;
+            colorDesc.SampleDesc.Count=sampleCount;colorDesc.SampleDesc.Quality=0;
+            colorDesc.Usage=D3D11_USAGE_DEFAULT;colorDesc.BindFlags=D3D11_BIND_RENDER_TARGET;
+            hr=device->CreateTexture2D(&colorDesc,nullptr,&sceneColorTexture);if(FAILED(hr))return false;
+            hr=device->CreateRenderTargetView(sceneColorTexture.Get(),nullptr,&renderTarget);if(FAILED(hr))return false;
+        }
 
         D3D11_TEXTURE2D_DESC depthDesc{};
         depthDesc.Width=width;depthDesc.Height=height;depthDesc.MipLevels=1;depthDesc.ArraySize=1;
-        depthDesc.Format=DXGI_FORMAT_D24_UNORM_S8_UINT;depthDesc.SampleDesc.Count=1;
+        depthDesc.Format=DXGI_FORMAT_D24_UNORM_S8_UINT;
+        depthDesc.SampleDesc.Count=sampleCount;depthDesc.SampleDesc.Quality=0;
         depthDesc.Usage=D3D11_USAGE_DEFAULT;depthDesc.BindFlags=D3D11_BIND_DEPTH_STENCIL;
         hr=device->CreateTexture2D(&depthDesc,nullptr,&depthTexture);if(FAILED(hr))return false;
         hr=device->CreateDepthStencilView(depthTexture.Get(),nullptr,&depthView);if(FAILED(hr))return false;
@@ -364,7 +379,19 @@ public:
         return true;
     }
 
-    void Render(const UnitView* units,UINT unitCount) {
+    bool SetQuality(int value) {
+        const int next=std::clamp(value,0,2);
+        if(next==quality)return true;
+        quality=next;
+        SelectSampleCount();
+        if(!RebuildWorldBuffer())return false;
+        return Resize(renderWidth,renderHeight);
+    }
+
+    int Quality() const { return quality; }
+    UINT Samples() const { return sampleCount; }
+
+    void Render(const UnitView* units,UINT unitCount,float time) {
         if(!context || !renderTarget || !depthView) return;
         const float white[4]={1.0f,1.0f,1.0f,1.0f};
         context->OMSetRenderTargets(1,renderTarget.GetAddressOf(),depthView.Get());
@@ -385,16 +412,29 @@ public:
         XMMATRIX projection=XMMatrixPerspectiveFovLH(XMConvertToRadians(43.0f),aspect,0.1f,150.0f);
         MatrixBuffer matrices{};
         XMStoreFloat4x4(&matrices.viewProjection,view*projection);
+        matrices.lighting=XMFLOAT4{
+            quality==0?0.045f:(quality==1?0.12f:0.22f),
+            quality==0?16.0f:(quality==1?28.0f:48.0f),
+            0.0f,0.0f
+        };
         context->UpdateSubresource(constantBuffer.Get(),0,nullptr,&matrices,0,0);
 
         const UINT stride=sizeof(Vertex),offset=0;
         context->IASetVertexBuffers(0,1,staticVertexBuffer.GetAddressOf(),&stride,&offset);
         context->Draw(staticVertexCount,0);
 
-        UpdateTroops(units,unitCount);
+        UpdateTroops(units,unitCount,time);
         if(dynamicVertexCount>0) {
+            context->OMSetBlendState(alphaBlend.Get(),nullptr,0xffffffff);
             context->IASetVertexBuffers(0,1,dynamicVertexBuffer.GetAddressOf(),&stride,&offset);
             context->Draw(dynamicVertexCount,0);
+            context->OMSetBlendState(nullptr,nullptr,0xffffffff);
+        }
+        if(sampleCount>1) {
+            ComPtr<ID3D11Texture2D> backBuffer;
+            if(SUCCEEDED(swapChain->GetBuffer(0,IID_PPV_ARGS(&backBuffer)))) {
+                context->ResolveSubresource(backBuffer.Get(),0,sceneColorTexture.Get(),0,DXGI_FORMAT_R8G8B8A8_UNORM);
+            }
         }
         swapChain->Present(1,0);
     }
@@ -406,19 +446,30 @@ private:
 
     bool CreateShaders() {
         static const char* shader=R"(
-cbuffer Scene : register(b0) { row_major float4x4 viewProjection; };
+cbuffer Scene : register(b0) {
+    row_major float4x4 viewProjection;
+    float4 lighting;
+};
 struct VSInput { float3 position : POSITION; float3 normal : NORMAL; float4 color : COLOR; };
-struct PSInput { float4 position : SV_POSITION; float4 color : COLOR; };
+struct PSInput { float4 position : SV_POSITION; float3 normal : NORMAL; float4 color : COLOR; };
 PSInput VSMain(VSInput input) {
     PSInput output;
     output.position = mul(float4(input.position,1.0f),viewProjection);
-    float3 lightDirection = normalize(float3(-0.45f,1.0f,-0.35f));
-    float diffuse = saturate(abs(dot(normalize(input.normal),lightDirection)));
-    float lighting = 0.34f + 0.66f*diffuse;
-    output.color = float4(input.color.rgb*lighting,input.color.a);
+    output.normal = input.normal;
+    output.color = input.color;
     return output;
 }
-float4 PSMain(PSInput input) : SV_TARGET { return input.color; }
+float4 PSMain(PSInput input) : SV_TARGET {
+    float3 n = normalize(input.normal);
+    float3 l = normalize(float3(-0.45f,1.0f,-0.35f));
+    float3 v = normalize(float3(0.0f,0.72f,-1.0f));
+    float3 h = normalize(l+v);
+    float diffuse = saturate(abs(dot(n,l)));
+    float specular = pow(saturate(abs(dot(n,h))),lighting.y)*lighting.x;
+    float ambient = 0.26f + 0.16f*saturate(abs(n.y));
+    float3 color = input.color.rgb*(ambient+0.72f*diffuse)+specular.xxx;
+    return float4(saturate(color),input.color.a);
+}
 )";
         ComPtr<ID3DBlob> vsBlob,psBlob,errors;
         HRESULT hr=D3DCompile(shader,std::strlen(shader),"Conflict3D",nullptr,nullptr,"VSMain","vs_5_0",
@@ -440,27 +491,45 @@ float4 PSMain(PSInput input) : SV_TARGET { return input.color; }
         return SUCCEEDED(hr);
     }
 
-    bool CreateBuffers() {
+    bool RebuildWorldBuffer() {
         MeshBuilder world;
-        BuildWorld(world);
+        BuildWorld(world,quality);
         if(world.vertices.empty())return false;
         D3D11_BUFFER_DESC desc{};
         desc.ByteWidth=static_cast<UINT>(world.vertices.size()*sizeof(Vertex));
         desc.Usage=D3D11_USAGE_IMMUTABLE;
         desc.BindFlags=D3D11_BIND_VERTEX_BUFFER;
         D3D11_SUBRESOURCE_DATA data{};data.pSysMem=world.vertices.data();
-        HRESULT hr=device->CreateBuffer(&desc,&data,&staticVertexBuffer);if(FAILED(hr))return false;
+        ComPtr<ID3D11Buffer> next;
+        HRESULT hr=device->CreateBuffer(&desc,&data,&next);
+        if(FAILED(hr))return false;
+        staticVertexBuffer=std::move(next);
         staticVertexCount=static_cast<UINT>(world.vertices.size());
+        return true;
+    }
 
-        MeshBuilder sphere;
-        sphere.Sphere(0,0,0,1,1,1,XMFLOAT4{1,1,1,1},9,12);
-        unitSphere=std::move(sphere.vertices);
+    void SelectSampleCount() {
+        const UINT wanted=quality==0?1u:(quality==1?2u:4u);
+        sampleCount=1;
+        for(UINT candidate=wanted;candidate>=2;candidate/=2) {
+            UINT colorLevels=0,depthLevels=0;
+            const HRESULT color=device->CheckMultisampleQualityLevels(DXGI_FORMAT_R8G8B8A8_UNORM,candidate,&colorLevels);
+            const HRESULT depth=device->CheckMultisampleQualityLevels(DXGI_FORMAT_D24_UNORM_S8_UINT,candidate,&depthLevels);
+            if(SUCCEEDED(color)&&SUCCEEDED(depth)&&colorLevels>0&&depthLevels>0) {
+                sampleCount=candidate;
+                break;
+            }
+        }
+    }
+
+    bool CreateBuffers() {
+        if(!RebuildWorldBuffer())return false;
         D3D11_BUFFER_DESC dynamicDesc{};
-        dynamicDesc.ByteWidth=static_cast<UINT>(MAX_UNITS*unitSphere.size()*sizeof(Vertex));
+        dynamicDesc.ByteWidth=MAX_DYNAMIC_VERTICES*sizeof(Vertex);
         dynamicDesc.Usage=D3D11_USAGE_DYNAMIC;
         dynamicDesc.BindFlags=D3D11_BIND_VERTEX_BUFFER;
         dynamicDesc.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;
-        hr=device->CreateBuffer(&dynamicDesc,nullptr,&dynamicVertexBuffer);if(FAILED(hr))return false;
+        HRESULT hr=device->CreateBuffer(&dynamicDesc,nullptr,&dynamicVertexBuffer);if(FAILED(hr))return false;
 
         D3D11_BUFFER_DESC cb{};
         cb.ByteWidth=sizeof(MatrixBuffer);cb.Usage=D3D11_USAGE_DEFAULT;cb.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
@@ -473,39 +542,49 @@ float4 PSMain(PSInput input) : SV_TARGET { return input.color; }
         raster.FillMode=D3D11_FILL_SOLID;
         raster.CullMode=D3D11_CULL_NONE;
         raster.DepthClipEnable=TRUE;
+        raster.MultisampleEnable=TRUE;
+        raster.AntialiasedLineEnable=TRUE;
         HRESULT hr=device->CreateRasterizerState(&raster,&rasterizer);if(FAILED(hr))return false;
         D3D11_DEPTH_STENCIL_DESC depth{};
         depth.DepthEnable=TRUE;depth.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ALL;depth.DepthFunc=D3D11_COMPARISON_LESS_EQUAL;
-        return SUCCEEDED(device->CreateDepthStencilState(&depth,&depthState));
+        hr=device->CreateDepthStencilState(&depth,&depthState);if(FAILED(hr))return false;
+
+        D3D11_BLEND_DESC blend{};
+        auto& rt=blend.RenderTarget[0];
+        rt.BlendEnable=TRUE;
+        rt.SrcBlend=D3D11_BLEND_SRC_ALPHA;
+        rt.DestBlend=D3D11_BLEND_INV_SRC_ALPHA;
+        rt.BlendOp=D3D11_BLEND_OP_ADD;
+        rt.SrcBlendAlpha=D3D11_BLEND_ONE;
+        rt.DestBlendAlpha=D3D11_BLEND_INV_SRC_ALPHA;
+        rt.BlendOpAlpha=D3D11_BLEND_OP_ADD;
+        rt.RenderTargetWriteMask=D3D11_COLOR_WRITE_ENABLE_ALL;
+        return SUCCEEDED(device->CreateBlendState(&blend,&alphaBlend));
     }
 
-    void UpdateTroops(const UnitView* units,UINT count) {
+    void UpdateTroops(const UnitView* units,UINT count,float time) {
         dynamicVertexCount=0;
         if(!units || !count)return;
-        D3D11_MAPPED_SUBRESOURCE mapped{};
-        if(FAILED(context->Map(dynamicVertexBuffer.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mapped)))return;
-        auto* output=static_cast<Vertex*>(mapped.pData);
-        const XMFLOAT4 blue{0.16f,0.43f,0.93f,1.0f};
-        const XMFLOAT4 red{0.91f,0.23f,0.18f,1.0f};
+        MeshBuilder models;
         const UINT limit=std::min(count,MAX_UNITS);
         for(UINT i=0;i<limit;++i) {
             if(!units[i].alive)continue;
-            const float x=units[i].x,z=units[i].z;
-            const float y=TerrainHeight(x,z)+0.27f;
-            const XMFLOAT4 color=units[i].team==0?blue:red;
-            for(const auto& v:unitSphere) {
-                Vertex out=v;
-                out.position.x=x+v.position.x*0.25f;
-                out.position.y=y+v.position.y*0.25f;
-                out.position.z=z+v.position.z*0.25f;
-                out.color=color;
-                output[dynamicVertexCount++]=out;
-            }
+            if(units[i].kind==3) BuildSupplyTruck(models,units[i],quality);
+            else BuildPerson(models,units[i],quality,time);
         }
+        if(models.vertices.empty())return;
+        dynamicVertexCount=static_cast<UINT>(std::min(models.vertices.size(),static_cast<std::size_t>(MAX_DYNAMIC_VERTICES)));
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        if(FAILED(context->Map(dynamicVertexBuffer.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mapped))) {
+            dynamicVertexCount=0;
+            return;
+        }
+        std::memcpy(mapped.pData,models.vertices.data(),dynamicVertexCount*sizeof(Vertex));
         context->Unmap(dynamicVertexBuffer.Get(),0);
     }
 
     ComPtr<ID3D11RenderTargetView> renderTarget;
+    ComPtr<ID3D11Texture2D> sceneColorTexture;
     ComPtr<ID3D11Texture2D> depthTexture;
     ComPtr<ID3D11DepthStencilView> depthView;
     ComPtr<ID3D11VertexShader> vertexShader;
@@ -514,8 +593,11 @@ float4 PSMain(PSInput input) : SV_TARGET { return input.color; }
     ComPtr<ID3D11Buffer> staticVertexBuffer,dynamicVertexBuffer,constantBuffer;
     ComPtr<ID3D11RasterizerState> rasterizer;
     ComPtr<ID3D11DepthStencilState> depthState;
-    std::vector<Vertex> unitSphere;
+    ComPtr<ID3D11BlendState> alphaBlend;
+    static constexpr UINT MAX_DYNAMIC_VERTICES=MAX_UNITS*2048;
     UINT staticVertexCount=0,dynamicVertexCount=0;
+    UINT sampleCount=1,renderWidth=0,renderHeight=0;
+    int quality=1;
     float aspect=16.0f/9.0f;
     D3D11_VIEWPORT viewport{};
 };
@@ -584,6 +666,13 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT message,WPARAM wParam,LPARAM lParam) 
     case WM_KEYDOWN:
         if(wParam==VK_F11)ToggleBorderless(hwnd);
         else if(wParam==VK_ESCAPE&&borderless)ToggleBorderless(hwnd);
+        else if(wParam==VK_F1&&renderer) {
+            if(renderer->SetQuality(0))SetWindowTextW(hwnd,L"CONFLICT | GRAFICOS: BAJOS (F1/F2/F3)");
+        } else if(wParam==VK_F2&&renderer) {
+            if(renderer->SetQuality(1))SetWindowTextW(hwnd,L"CONFLICT | GRAFICOS: MEDIOS (F1/F2/F3)");
+        } else if(wParam==VK_F3&&renderer) {
+            if(renderer->SetQuality(2))SetWindowTextW(hwnd,L"CONFLICT | GRAFICOS: ALTOS (F1/F2/F3)");
+        }
         return 0;
     case WM_GETMINMAXINFO: {
         auto* info=reinterpret_cast<MINMAXINFO*>(lParam);
@@ -606,7 +695,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR,int show) {
     if(!RegisterClassExW(&wc))return 1;
 
     RECT bounds{0,0,1440,900};AdjustWindowRect(&bounds,WS_OVERLAPPEDWINDOW,FALSE);
-    HWND hwnd=CreateWindowExW(0,WINDOW_CLASS,L"CONFLICT",WS_OVERLAPPEDWINDOW,
+    HWND hwnd=CreateWindowExW(0,WINDOW_CLASS,L"CONFLICT | GRAFICOS: MEDIOS (F1/F2/F3)",WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT,CW_USEDEFAULT,bounds.right-bounds.left,bounds.bottom-bounds.top,
         nullptr,nullptr,instance,nullptr);
     if(!hwnd)return 1;
@@ -643,7 +732,8 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR,int show) {
 
         rustUpdate(dt);
         const std::size_t count=rustGetUnits(unitBuffer,MAX_UNITS);
-        graphics.Render(unitBuffer,static_cast<UINT>(std::min(count,static_cast<std::size_t>(MAX_UNITS))));
+        const float elapsed=std::chrono::duration<float>(now.time_since_epoch()).count();
+        graphics.Render(unitBuffer,static_cast<UINT>(std::min(count,static_cast<std::size_t>(MAX_UNITS))),elapsed);
         Sleep(1);
     }
     renderer=nullptr;
