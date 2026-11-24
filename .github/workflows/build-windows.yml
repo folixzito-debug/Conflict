@@ -65,4 +65,4 @@ jobs:
           files: |
             build/Release/Conflict.exe
             build/Release/conflict_core.dll
-            Conflict-0.5.0-Windows.zip
+            Conflict-0.7.0-Windows.zip
