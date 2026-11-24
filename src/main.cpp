@@ -85,7 +85,7 @@ HRESULT InitGraphics(HWND hwnd){
  const D3D_FEATURE_LEVEL levels[]={D3D_FEATURE_LEVEL_11_0,D3D_FEATURE_LEVEL_10_1,D3D_FEATURE_LEVEL_10_0};D3D_FEATURE_LEVEL obtained{};
  HRESULT h=D3D11CreateDeviceAndSwapChain(nullptr,D3D_DRIVER_TYPE_HARDWARE,nullptr,D3D11_CREATE_DEVICE_BGRA_SUPPORT,levels,3,D3D11_SDK_VERSION,&sd,&swapChain,&device,&obtained,&context);
  if(FAILED(h))return h;
- h=D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED,&d2dFactory);if(FAILED(h))return h;
+ h=D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED,d2dFactory.GetAddressOf());if(FAILED(h))return h;
  h=DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED,__uuidof(IDWriteFactory),reinterpret_cast<IUnknown**>(writeFactory.GetAddressOf()));if(FAILED(h))return h;
  if(FAILED(MakeFormat(11,DWRITE_FONT_WEIGHT_MEDIUM,DWRITE_TEXT_ALIGNMENT_LEADING,&smallFont)))return E_FAIL;
  if(FAILED(MakeFormat(14,DWRITE_FONT_WEIGHT_NORMAL,DWRITE_TEXT_ALIGNMENT_LEADING,&bodyFont)))return E_FAIL;
