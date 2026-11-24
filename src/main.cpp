@@ -53,7 +53,8 @@ struct MeshBuilder {
         XMVECTOR vb = XMLoadFloat3(&b);
         XMVECTOR vc = XMLoadFloat3(&c);
         XMVECTOR cross = XMVector3Cross(vb - va, vc - va);
-        XMVECTOR normal = XMVector3Normalize(cross);
+        XMVECTOR normal = XMVector3LengthSq(cross).m128_f32[0] < 1.0e-10f
+            ? XMVectorSet(0.0f,1.0f,0.0f,0.0f) : XMVector3Normalize(cross);
         XMFLOAT3 n{};
         XMStoreFloat3(&n, normal);
         vertices.push_back({a, n, color});
@@ -348,6 +349,7 @@ public:
     bool Resize(UINT width,UINT height) {
         if(!swapChain || !width || !height) return true;
         renderWidth=width;renderHeight=height;
+        if(context) context->OMSetRenderTargets(0,nullptr,nullptr);
         renderTarget.Reset();sceneColorTexture.Reset();depthView.Reset();depthTexture.Reset();
         HRESULT hr=swapChain->ResizeBuffers(0,width,height,DXGI_FORMAT_UNKNOWN,0);
         if(FAILED(hr)) return false;
