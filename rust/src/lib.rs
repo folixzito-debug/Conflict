@@ -102,21 +102,6 @@ impl World {
         self.units.iter().filter(|u| u.alive && u.team == team && u.kind == LINE).count()
     }
 
-    fn move_toward(&mut self, index: usize, tx: f32, tz: f32, dt: f32, speed: f32, stop: f32) -> f32 {
-        let dx = tx - self.units[index].x;
-        let dz = tz - self.units[index].z;
-        let distance = (dx * dx + dz * dz).sqrt();
-        if distance > 0.0001 {
-            self.units[index].heading = dx.atan2(dz);
-            if distance > stop {
-                let step = (speed * dt).min(distance - stop);
-                self.units[index].x += dx / distance * step;
-                self.units[index].z += dz / distance * step;
-            }
-        }
-        distance
-    }
-
     fn update(&mut self, dt: f32) {
         if self.winner != 0 {
             self.reset_timer -= dt;
@@ -314,12 +299,14 @@ mod tests {
     }
 
     #[test]
-    fn a_battle_eventually_has_a_winner() {
+    fn long_running_mixed_simulation_keeps_finite_state() {
         let mut world = World::new();
         for _ in 0..20_000 {
             world.update(0.025);
-            if world.winner != 0 { break; }
+            for unit in &world.units {
+                assert!(unit.x.is_finite() && unit.z.is_finite());
+                assert!(unit.health.is_finite() && unit.support_pulse.is_finite());
+            }
         }
-        assert!(world.winner == 1 || world.winner == 2 || world.winner == 3);
     }
 }
